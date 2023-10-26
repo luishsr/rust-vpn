@@ -262,7 +262,7 @@ async fn main() {
 
                     let mut data_to_encrypt = [0u8; 32];
 
-                    data_to_encrypt[..n].copy_from_slice(&buf[..n]);
+                    //data_to_encrypt[..n].copy_from_slice(&buf[..n]);
 
                     let encrypted_data = encrypt(&data_to_encrypt);
                     let packet = VpnPacket { data: Vec::from(encrypted_data) };
