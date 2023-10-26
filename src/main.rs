@@ -35,14 +35,29 @@ async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result
     println!("Client {} connected to the VPN.", peer_address);
 
     let mut buf = vec![0u8; 4096];
+    let mut first_message = true;
+
     loop {
         match stream.read(&mut buf).await {
             Ok(n) if n > 0 => {
-                let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
-                let decrypted_data = decrypt(&packet.data, &KEY).unwrap();
-                let mut locked_tun = tun.lock().await;
+                if first_message {
+                    eprintln!("Received initial message: {:?}", &buf[..n]);
+                    first_message = false;
+                    continue;
+                }
 
-                locked_tun.write(&decrypted_data);
+                let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
+
+                let decrypted_data = match decrypt(&packet.data, &KEY) {
+                    Ok(data) => {
+                        let mut locked_tun = tun.lock().await;
+                        locked_tun.write(&data);
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to decrypt packet data: {:?}", e);
+                        continue;
+                    }
+                };
             }
             Ok(_) => {}
             Err(e) => {
