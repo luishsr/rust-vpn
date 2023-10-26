@@ -68,15 +68,8 @@ async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result
         match stream.read(&mut buf).await {
             Ok(n) if n > 0 => {
                 let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
-
-                let data_array: [u8; 32] = packet.data.try_into().expect("Failed to convert to fixed-size array");
-
-                //let decrypted_data = decrypt(&data_array);
-
                 let mut locked_tun = tun.lock().await;
-
-                locked_tun.write(&data_array);
-
+                locked_tun.write(&packet.data);
             }
             Ok(_) => {}
             Err(e) => {
@@ -86,6 +79,15 @@ async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result
         }
     }
     Ok(())
+}
+
+fn to_fixed_size_array(slice: &[u8]) -> Option<[u8; 32]> {
+    if slice.len() != 32 {
+        return None;
+    }
+    let mut array = [0u8; 32];
+    array.copy_from_slice(slice);
+    Some(array)
 }
 
 fn set_client_ip_and_route() {
@@ -259,10 +261,9 @@ async fn main() {
                 let mut buf = vec![0u8; 4096];
                 let n = tun_device.read(&mut buf).unwrap();
                 if n > 0 {
+                    println!("Connected.");
 
                     let mut data_to_encrypt = [0u8; 32];
-
-                    //data_to_encrypt[..n].copy_from_slice(&buf[..n]);
 
                     let encrypted_data = encrypt(&data_to_encrypt);
                     let packet = VpnPacket { data: Vec::from(encrypted_data) };
