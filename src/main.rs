@@ -7,6 +7,7 @@ use anyhow::Result;
 use std::io::Write;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use aes_gcm::{Aes256Gcm, KeyInit};
 use aes_gcm::aead::Aead;
 use bincode::{config, deserialize, serialize};
@@ -176,21 +177,36 @@ async fn main() {
         setup_tun_interface();
 
         println!("Server listening...");
-        loop {
+
+        let shutdown_signal = Arc::new(AtomicBool::new(false));
+
+        // Clone it for use in the ctrlc handler
+        let sig_clone = shutdown_signal.clone();
+
+        ctrlc::set_handler(move || {
+            sig_clone.store(true, Ordering::SeqCst);
+        }).expect("Error setting Ctrl-C handler");
+
+        // Wait for a shutdown signal
+        while !shutdown_signal.load(Ordering::SeqCst) {
             let (stream, _) = listener.accept().await.unwrap();
             tokio::spawn(handle_client(stream, shared_tun.clone()));
         }
+
+        // If we reach here, it means a shutdown signal was received.
+        destroy_tun_interface();
+
     } else {
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
             println!("Connecting to VPN server on {}", vpn_server_ip);
 
             // Use vpn_server_ip for setting up the client connection
             let server_address = format!("{}:12345", vpn_server_ip);
+
             let mut stream = TcpStream::connect(server_address).await.unwrap();
 
             let mut config = tun::Configuration::default();
             config.name("tun0");
-
             let mut tun_device = tun::create(&config).unwrap();
 
             // Client mode setup
@@ -210,5 +226,19 @@ async fn main() {
             eprintln!("The vpn-server IP address is required for client mode!");
             return;
         }
+    }
+}
+
+fn destroy_tun_interface() {
+    let output = Command::new("sudo")
+        .arg("ip")
+        .arg("link")
+        .arg("delete")
+        .arg("tun0")
+        .output()
+        .expect("Failed to execute command to delete TUN interface");
+
+    if !output.status.success() {
+        eprintln!("Failed to delete TUN interface: {}", String::from_utf8_lossy(&output.stderr));
     }
 }
