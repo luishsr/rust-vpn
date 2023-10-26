@@ -144,7 +144,13 @@ async fn main() {
             .index(1)
             .possible_values(&["server", "client"])
             .help("Runs the program in either server or client mode"))
+        .arg(Arg::with_name("vpn-server")
+            .long("vpn-server")
+            .value_name("IP")
+            .help("The IP address of the VPN server to connect to (client mode only)")
+            .takes_value(true))
         .get_matches();
+
 
     let is_server_mode = matches.value_of("mode").unwrap() == "server";
 
@@ -168,26 +174,32 @@ async fn main() {
             tokio::spawn(handle_client(stream, shared_tun.clone()));
         }
     } else {
+        if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
+            // Use vpn_server_ip for setting up the client connection
+            let server_address = format!("{}:12345", vpn_server_ip);
+            let mut stream = TcpStream::connect(server_address).await.unwrap();
 
-        let mut stream = TcpStream::connect("10.0.0.107:12345").await.unwrap();
+            let mut config = tun::Configuration::default();
+            config.name("tun0");
 
-        let mut config = tun::Configuration::default();
-        config.name("tun0");
+            let mut tun_device = tun::create(&config).unwrap();
 
-        let mut tun_device = tun::create(&config).unwrap();
+            // Client mode setup
+            set_client_ip_and_route();
 
-        // Client mode setup
-        set_client_ip_and_route();
-
-        loop {
-            let mut buf = vec![0u8; 4096];
-            let n = tun_device.read(&mut buf).unwrap();
-            if n > 0 {
-                let encrypted_data = encrypt(&buf[..n], &KEY);
-                let packet = VpnPacket { data: encrypted_data };
-                let serialized_data = serialize(&packet).unwrap();
-                let _ = stream.write_all(&serialized_data).await;
+            loop {
+                let mut buf = vec![0u8; 4096];
+                let n = tun_device.read(&mut buf).unwrap();
+                if n > 0 {
+                    let encrypted_data = encrypt(&buf[..n], &KEY);
+                    let packet = VpnPacket { data: encrypted_data };
+                    let serialized_data = serialize(&packet).unwrap();
+                    let _ = stream.write_all(&serialized_data).await;
+                }
             }
+        } else {
+            eprintln!("The vpn-server IP address is required for client mode!");
+            return;
         }
     }
 }
