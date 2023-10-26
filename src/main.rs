@@ -122,6 +122,9 @@ async fn main() {
         let listener = TcpListener::bind("0.0.0.0:12345").await.unwrap();
 
         let mut config = tun::Configuration::default();
+
+        config.name("tun0");
+
         let tun_device = tun::create(&config).unwrap();
         let shared_tun = Arc::new(Mutex::new(tun_device));
 
@@ -136,6 +139,8 @@ async fn main() {
         let mut stream = TcpStream::connect("server_ip:12345").await.unwrap();
 
         let mut config = tun::Configuration::default();
+        config.name("tun0");
+
         let mut tun_device = tun::create(&config).unwrap();
 
 
