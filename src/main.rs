@@ -250,8 +250,12 @@ async fn main() {
 
             let mut stream = TcpStream::connect(server_address).await.unwrap();
 
+            println!("Connected.");
+
             let mut config = tun::Configuration::default();
+
             config.name("tun0");
+
             let mut tun_device = tun::create(&config).unwrap();
 
             // Client mode setup
@@ -261,8 +265,6 @@ async fn main() {
                 let mut buf = vec![0u8; 4096];
                 let n = tun_device.read(&mut buf).unwrap();
                 if n > 0 {
-                    println!("Connected.");
-
                     let mut data_to_encrypt = [0u8; 32];
 
                     let encrypted_data = encrypt(&data_to_encrypt);
