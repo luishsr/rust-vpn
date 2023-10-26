@@ -19,7 +19,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tun::platform::{Configuration, Device};
 
-const KEY: [u8; 32] = [0u8; 32]; // Replace with your AES key
+// For tests only!!
+const KEY: [u8; 32] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+
 const NONCE_LEN: usize = 12;
 
 #[derive(Serialize, Deserialize)]
@@ -35,17 +37,10 @@ async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result
     println!("Client {} connected to the VPN.", peer_address);
 
     let mut buf = vec![0u8; 4096];
-    let mut first_message = true;
 
     loop {
         match stream.read(&mut buf).await {
             Ok(n) if n > 0 => {
-                if first_message {
-                    eprintln!("Received initial message: {:?}", &buf[..n]);
-                    first_message = false;
-                    continue;
-                }
-
                 let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
 
                 let decrypted_data = match decrypt(&packet.data, &KEY) {
