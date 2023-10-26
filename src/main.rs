@@ -180,21 +180,42 @@ async fn main() {
 
         let shutdown_signal = Arc::new(AtomicBool::new(false));
 
-        // Clone it for use in the ctrlc handler
-        let sig_clone = shutdown_signal.clone();
-
-        ctrlc::set_handler(move || {
-            sig_clone.store(true, Ordering::SeqCst);
-        }).expect("Error setting Ctrl-C handler");
+        // Spawn a task to listen for the Ctrl+C signal
+        let signal_listener = {
+            let shutdown_signal = shutdown_signal.clone();
+            tokio::spawn(async move {
+                tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl_c");
+                shutdown_signal.store(true, Ordering::SeqCst);
+            })
+        };
 
         // Wait for a shutdown signal
-        while !shutdown_signal.load(Ordering::SeqCst) {
-            let (stream, _) = listener.accept().await.unwrap();
-            tokio::spawn(handle_client(stream, shared_tun.clone()));
+        loop {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), listener.accept()).await {
+                Ok(Ok((stream, _))) => {
+                    tokio::spawn(handle_client(stream, shared_tun.clone()));
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Error accepting connection: {}", e);
+                }
+                Err(_) => {
+                    // Timeout
+                    if shutdown_signal.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+            }
         }
 
+        // Here, you might want to give active tasks a moment to finish before forcing them to shut down.
+        // For example:
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
         // If we reach here, it means a shutdown signal was received.
-        destroy_tun_interface();
+        destroy_tun_interface().await;
+
+        // Optionally, you can wait for the signal_listener to complete
+        signal_listener.await.expect("Signal listener task failed");
 
     } else {
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
@@ -229,7 +250,7 @@ async fn main() {
     }
 }
 
-fn destroy_tun_interface() {
+async fn destroy_tun_interface() {
     let output = Command::new("sudo")
         .arg("ip")
         .arg("link")
