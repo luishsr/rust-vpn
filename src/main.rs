@@ -10,8 +10,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use aes_gcm::{Aes256Gcm, KeyInit};
 use aes_gcm::aead::Aead;
+use aes_gcm::aes::Aes256;
+use aes_gcm::aes::cipher::{BlockDecrypt, BlockEncrypt};
+use aes_soft::cipher::NewStreamCipher;
 use bincode::{config, deserialize, serialize};
+use block_modes::{BlockMode, Cbc};
+use block_padding::Pkcs7;
 use clap::{App, Arg};
+use generic_array::GenericArray;
 use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -19,10 +25,30 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tun::platform::{Configuration, Device};
 
-// For tests only!!
-const KEY: [u8; 32] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
 
-const NONCE_LEN: usize = 12;
+const KEY: [u8; 32] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+const NONCE: [u8; 12] = [0; 12];  // Using a constant nonce for simplicity; in a real application, each nonce should be unique
+
+fn encrypt(data: &[u8]) -> Vec<u8> {
+    let key = GenericArray::from_slice(&KEY);
+    let nonce = GenericArray::from_slice(&NONCE);
+    let cipher = Aes256Gcm::new(key);
+
+    let ciphertext = cipher.encrypt(nonce, data.as_ref()).expect("encryption failure!");
+    ciphertext
+}
+
+fn decrypt(encrypted_data: &[u8]) -> Vec<u8> {
+    let key = GenericArray::from_slice(&KEY);
+    let nonce = GenericArray::from_slice(&NONCE);
+    let cipher = Aes256Gcm::new(key);
+
+    let decrypted_data = cipher.decrypt(nonce, encrypted_data.as_ref()).expect("decryption failure!");
+    decrypted_data
+}
 
 #[derive(Serialize, Deserialize)]
 struct VpnPacket {
@@ -43,16 +69,14 @@ async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result
             Ok(n) if n > 0 => {
                 let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
 
-                let decrypted_data = match decrypt(&packet.data, &KEY) {
-                    Ok(data) => {
-                        let mut locked_tun = tun.lock().await;
-                        locked_tun.write(&data);
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to decrypt packet data: {:?}", e);
-                        continue;
-                    }
-                };
+                let data_array: [u8; 32] = packet.data.try_into().expect("Failed to convert to fixed-size array");
+
+                //let decrypted_data = decrypt(&data_array);
+
+                let mut locked_tun = tun.lock().await;
+
+                locked_tun.write(&data_array);
+
             }
             Ok(_) => {}
             Err(e) => {
@@ -62,18 +86,6 @@ async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result
         }
     }
     Ok(())
-}
-
-fn encrypt(data: &[u8], key: &[u8; 32]) -> Vec<u8> {
-    let cipher = Aes256Gcm::new(key.into());
-    let nonce = rand::thread_rng().gen::<[u8; NONCE_LEN]>();
-    cipher.encrypt(&nonce.into(), data).unwrap()
-}
-
-fn decrypt(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, aes_gcm::aead::Error> {
-    let cipher = Aes256Gcm::new(key.into());
-    let nonce = &data[0..NONCE_LEN];
-    cipher.decrypt(nonce.into(), &data[NONCE_LEN..])
 }
 
 fn set_client_ip_and_route() {
@@ -247,9 +259,15 @@ async fn main() {
                 let mut buf = vec![0u8; 4096];
                 let n = tun_device.read(&mut buf).unwrap();
                 if n > 0 {
-                    let encrypted_data = encrypt(&buf[..n], &KEY);
-                    let packet = VpnPacket { data: encrypted_data };
+
+                    let mut data_to_encrypt = [0u8; 32];
+
+                    data_to_encrypt[..n].copy_from_slice(&buf[..n]);
+
+                    let encrypted_data = encrypt(&data_to_encrypt);
+                    let packet = VpnPacket { data: Vec::from(encrypted_data) };
                     let serialized_data = serialize(&packet).unwrap();
+
                     let _ = stream.write_all(&serialized_data).await;
                 }
             }
@@ -271,5 +289,36 @@ async fn destroy_tun_interface() {
 
     if !output.status.success() {
         eprintln!("Failed to delete TUN interface: {}", String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: [u8; 32] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+
+    #[test]
+    fn test_encryption_decryption() {
+        let original = b"hello";
+
+        // Encrypt the original data
+        let mut data_to_encrypt = [0u8; 32]; // Initialize an array with zeros
+        data_to_encrypt[..original.len()].copy_from_slice(original); // Copy the data from 'original' into the array
+        let encrypted = encrypt(&data_to_encrypt);
+
+        // Ensure the encrypted data isn't the same as the original
+        assert_ne!(&encrypted[..], original);
+
+        // Decrypt the encrypted data
+        let decrypted = decrypt(&encrypted);
+
+        // Convert decrypted to a slice and trim trailing null bytes
+        let trimmed_decrypted = &decrypted[..original.len()];
+
+        assert_eq!(original, trimmed_decrypted);
     }
 }
