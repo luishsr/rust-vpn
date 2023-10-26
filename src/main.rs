@@ -1,6 +1,7 @@
 extern crate serde_derive;
 extern crate tun;
 
+use std::error::Error;
 use std::io::Read;
 use anyhow::Result;
 use std::io::Write;
@@ -102,6 +103,36 @@ fn set_client_ip_and_route() {
     }
 }
 
+fn setup_tun_interface() -> Result<(), Box<dyn Error>> {
+    let output = Command::new("sudo")
+        .arg("ip")
+        .arg("link")
+        .arg("set")
+        .arg("dev")
+        .arg("tun0")
+        .arg("up")
+        .output()?;
+
+    if !output.status.success() {
+        return Err(format!("Failed to bring up tun0: {:?}", output.stderr).into());
+    }
+
+    let output = Command::new("sudo")
+        .arg("ip")
+        .arg("addr")
+        .arg("add")
+        .arg("10.0.0.1/24")
+        .arg("dev")
+        .arg("tun0")
+        .output()?;
+
+    if !output.status.success() {
+        return Err(format!("Failed to assign IP to tun0: {:?}", output.stderr).into());
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let matches = App::new("Simple VPN")
@@ -126,7 +157,10 @@ async fn main() {
         config.name("tun0");
 
         let tun_device = tun::create(&config).unwrap();
+
         let shared_tun = Arc::new(Mutex::new(tun_device));
+
+        setup_tun_interface();
 
         println!("Server listening...");
         loop {
@@ -134,15 +168,16 @@ async fn main() {
             tokio::spawn(handle_client(stream, shared_tun.clone()));
         }
     } else {
-        // Client mode setup
-        set_client_ip_and_route();
-        let mut stream = TcpStream::connect("server_ip:12345").await.unwrap();
+
+        let mut stream = TcpStream::connect("10.0.0.107:12345").await.unwrap();
 
         let mut config = tun::Configuration::default();
         config.name("tun0");
 
         let mut tun_device = tun::create(&config).unwrap();
 
+        // Client mode setup
+        set_client_ip_and_route();
 
         loop {
             let mut buf = vec![0u8; 4096];
