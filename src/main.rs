@@ -27,6 +27,12 @@ struct VpnPacket {
 }
 
 async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result<()> {
+
+    // Get the peer address and print it
+    let peer_address = stream.peer_addr().unwrap_or_else(|_| "Unknown peer".to_string().parse().unwrap());
+
+    println!("Client {} connected to the VPN.", peer_address);
+
     let mut buf = vec![0u8; 4096];
     loop {
         match stream.read(&mut buf).await {
@@ -34,6 +40,7 @@ async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result
                 let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
                 let decrypted_data = decrypt(&packet.data, &KEY).unwrap();
                 let mut locked_tun = tun.lock().await;
+
                 locked_tun.write(&decrypted_data);
             }
             Ok(_) => {}
@@ -175,6 +182,8 @@ async fn main() {
         }
     } else {
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
+            println!("Connecting to VPN server on {}", vpn_server_ip);
+
             // Use vpn_server_ip for setting up the client connection
             let server_address = format!("{}:12345", vpn_server_ip);
             let mut stream = TcpStream::connect(server_address).await.unwrap();
