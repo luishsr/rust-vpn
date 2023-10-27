@@ -278,6 +278,9 @@ async fn main() {
             let tun_device_for_write = tun_device.clone();
             let write_to_server = tokio::spawn(async move {
                 loop {
+
+                    println!("Writing data to Server");
+
                     let mut buf = vec![0u8; 4096];
                     let n = tun_device_for_write.lock().await.read(&mut buf).unwrap();
                     if n > 0 {
@@ -287,6 +290,9 @@ async fn main() {
 
                         let mut locked_stream = stream_for_writing.lock().await;
                         let _ = locked_stream.write_all(&serialized_data).await;
+
+                        println!("Data sent to Server");
+
                     }
                 }
             });
@@ -295,10 +301,19 @@ async fn main() {
             let tun_device_for_read = tun_device.clone();
             let read_from_server = tokio::spawn(async move {
                 loop {
+                    println!("Task for reading from the server initiated");
+
                     let mut buf = vec![0u8; 4096];
                     let mut locked_stream = stream_for_reading.lock().await;
+
+                    println!("Reading from Server - line 301");
+
                     match locked_stream.read(&mut buf).await {
                         Ok(n) if n > 0 => {
+
+                            println!("Ok(n) if n > 0 is TRUE");
+
+
                             let mut packet: VpnPacket = deserialize(&buf[..n]).unwrap();
                             let decrypted_data = decrypt(&packet.data);
 
@@ -309,7 +324,13 @@ async fn main() {
                             packet.data.truncate(n);
 
                             if let Some(ip_header) = extract_ipv4_header(&decrypted_data) {
+
+                                println!("Extracted IPV4 Header");
+
                                 if ip_header.protocol == 6 {
+
+                                    println!("Protocol == 6");
+
                                     if let Some(tcp_header) = extract_tcp_header(&packet.data[20..]) {
                                         match forward_packet_to_destination(&packet.data, ip_header.daddr, tcp_header.dest_port) {
                                             Ok(response) => {
