@@ -5,21 +5,23 @@ use std::error::Error;
 use std::io::Read;
 use anyhow::Result;
 use std::io::Write;
+use std::mem::MaybeUninit;
+use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use aes_gcm::{Aes256Gcm, KeyInit};
 use aes_gcm::aead::Aead;
-use aes_gcm::aes::Aes256;
 use aes_gcm::aes::cipher::{BlockDecrypt, BlockEncrypt};
 use aes_soft::cipher::NewStreamCipher;
 use bincode::{config, deserialize, serialize};
 use block_modes::{BlockMode, Cbc};
-use block_padding::Pkcs7;
 use clap::{App, Arg};
 use generic_array::GenericArray;
 use rand::Rng;
+use std::error::Error as StdError;
 use serde_derive::{Deserialize, Serialize};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -292,19 +294,37 @@ async fn main() {
             // Task for reading from the server and writing to TUN
             let tun_device_for_read = tun_device.clone();
             let read_from_server = tokio::spawn(async move {
-                let mut buf = vec![0u8; 4096];
                 loop {
+                    let mut buf = vec![0u8; 4096];
                     let mut locked_stream = stream_for_reading.lock().await;
                     match locked_stream.read(&mut buf).await {
                         Ok(n) if n > 0 => {
-                            let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
+                            let mut packet: VpnPacket = deserialize(&buf[..n]).unwrap();
                             let decrypted_data = decrypt(&packet.data);
 
                             // TODO: Implement forward and response
                             //////// ADD FORWARDING LOGIC HERE ///////////////
 
 
-                            let _ = tun_device_for_read.lock().await.write_all(&decrypted_data);
+                            packet.data.truncate(n);
+
+                            if let Some(ip_header) = extract_ipv4_header(&decrypted_data) {
+                                if ip_header.protocol == 6 {
+                                    if let Some(tcp_header) = extract_tcp_header(&packet.data[20..]) {
+                                        match forward_packet_to_destination(&packet.data, ip_header.daddr, tcp_header.dest_port) {
+                                            Ok(response) => {
+                                                let _ = tun_device_for_read.lock().await.write_all(&response);
+                                            },
+                                            Err(e) => {
+                                                println!("Error forwarding packet: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            ///////// END OF FORWARD LOGIC ///////
+
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -336,6 +356,76 @@ async fn destroy_tun_interface() {
     if !output.status.success() {
         eprintln!("Failed to delete TUN interface: {}", String::from_utf8_lossy(&output.stderr));
     }
+}
+
+struct Ipv4Header {
+    version: u8,
+    ihl: u8,
+    tot_len: u16,
+    id: u16,
+    flags: u16,
+    ttl: u8,
+    protocol: u8,
+    checksum: u16,
+    saddr: [u8; 4],
+    daddr: [u8; 4],
+}
+
+struct TcpHeader {
+    source_port: u16,
+    dest_port: u16,
+    // ... Other TCP header fields ...
+}
+
+fn extract_ipv4_header(packet: &[u8]) -> Option<Ipv4Header> {
+    if packet.len() < 20 {
+        return None;
+    }
+
+    Some(Ipv4Header {
+        version: packet[0] >> 4,
+        ihl: packet[0] & 0xF,
+        tot_len: u16::from_be_bytes([packet[2], packet[3]]),
+        id: u16::from_be_bytes([packet[4], packet[5]]),
+        flags: u16::from_be_bytes([packet[6], packet[7]]),
+        ttl: packet[8],
+        protocol: packet[9],
+        checksum: u16::from_be_bytes([packet[10], packet[11]]),
+        saddr: [packet[12], packet[13], packet[14], packet[15]],
+        daddr: [packet[16], packet[17], packet[18], packet[19]],
+    })
+}
+
+fn extract_tcp_header(packet: &[u8]) -> Option<TcpHeader> {
+    if packet.len() < 20 {
+        return None;
+    }
+
+    Some(TcpHeader {
+        source_port: u16::from_be_bytes([packet[0], packet[1]]),
+        dest_port: u16::from_be_bytes([packet[2], packet[3]]),
+        // ... Extract other TCP fields as needed ...
+    })
+}
+
+fn forward_packet_to_destination(packet: &[u8], dest_ip: [u8; 4], dest_port: u16) -> Result<Vec<u8>, Box<dyn StdError + Send>> {
+    println!("Server forwarding packet to destination {:?}", dest_ip);
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(|e| Box::new(e) as Box<dyn StdError + Send>)?;
+    let address_string = format!("{}.{}.{}.{}:{}", dest_ip[0], dest_ip[1], dest_ip[2], dest_ip[3], dest_port);
+    let address: SocketAddr = address_string.parse().unwrap();
+
+    socket.send_to(packet, &address.into()).map_err(|e| Box::new(e) as Box<dyn StdError + Send>)?;
+
+
+    let mut response = vec![0u8; 4096];
+    let mut uninitialized: [MaybeUninit<u8>; 4096] = unsafe { MaybeUninit::uninit().assume_init() };
+    let (amt, _) = socket.recv_from(&mut uninitialized).map_err(|e| Box::new(e) as Box<dyn StdError + Send>)?;
+    for i in 0..amt {
+        response[i] = unsafe { uninitialized[i].assume_init() };
+    }
+    response.truncate(amt);
+
+    Ok(response)
 }
 
 #[cfg(test)]
