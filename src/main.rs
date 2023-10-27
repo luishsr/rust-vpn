@@ -321,6 +321,8 @@ async fn main() {
                     match locked_stream.read(&mut buf).await {
                         Ok(n) if n > 0 => {
 
+                            println!("Read from Server: N > 0");
+
                             let version = buf[0] >> 4;
 
                             // Handle IPv4 packets
