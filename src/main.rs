@@ -274,14 +274,16 @@ async fn main() {
 
             let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
-            // Task for reading from the TUN and writing to the server
             let tun_device_for_write = tun_device.clone();
 
             let write_to_server = tokio::spawn(async move {
                 loop {
                     let mut buf = vec![0u8; 4096];
+                    println!("Write to Server: Locking tun0 for write");
+                    // Task for reading from the TUN and writing to the server
                     match tun_device_for_write.lock().await.read(&mut buf) {
                         Ok(n) if n > 0 => {
+                            println!("Write to Server: Data read from tun0.");
                             let encrypted_data = encrypt(&buf[..n]);
                             let packet = VpnPacket { data: encrypted_data };
                             let serialized_data = serialize(&packet).unwrap();
@@ -293,7 +295,7 @@ async fn main() {
                         Err(e) => {
                             eprintln!("Error reading from TUN device: {}", e);
                         }
-                    }
+                    };
                 }
             });
 
@@ -301,9 +303,13 @@ async fn main() {
             let cloned_stream_for_write = stream.clone();
             let read_channel_write_server = tokio::spawn(async move {
                 while let Some(serialized_data) = rx.recv().await {
+                    println!("Read from Server: Locking stream for writing");
                     let mut locked_stream = cloned_stream_for_write.lock().await;
+                    println!("Read from Server: Stream locked");
                     let (_, mut writer) = locked_stream.split();
+                    println!("Read from Server: Writing serialized data to the stream");
                     writer.write_all(&serialized_data).await.expect("Failed to write to server");
+                    println!("Read from Server: Serialized data sent.");
                 }
             });
 
@@ -314,8 +320,12 @@ async fn main() {
             let read_from_server = tokio::spawn(async move {
                 loop {
                     let mut buf = vec![0u8; 4096];
+                    println!("Read from Server: Locking stream for reading");
                     let mut locked_stream = cloned_stream_for_read.lock().await;
+                    println!("Read from Server: Reading stream locked.");
+                    println!("Read from Server: Spliting locked stream");
                     let (mut reader, _) = locked_stream.split();
+                    println!("Read from Server: Stream split.");
                     match reader.read(&mut buf).await {
                         Ok(n) if n > 0 => {
 
@@ -395,7 +405,7 @@ async fn main() {
             });
 
             // Wait for the tasks to complete
-            let _ = tokio::try_join!(write_to_server, read_channel_write_server , read_from_server);
+            let _ = tokio::try_join!(write_to_server, read_channel_write_server);
         } else {
             eprintln!("The vpn-server IP address is required for client mode!");
             return;
