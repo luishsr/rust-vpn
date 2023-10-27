@@ -260,14 +260,14 @@ async fn main() {
 
     } else {
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
-            println!("Client Mode: Connecting to VPN server on {}", vpn_server_ip);
+            //println!("Client Mode: Connecting to VPN server on {}", vpn_server_ip);
 
             // Use vpn_server_ip for setting up the client connection
             let server_address = format!("{}:12345", vpn_server_ip);
             let mut stream = TcpStream::connect(server_address).await.unwrap();
             let stream = Arc::new(Mutex::new(stream)); // Wrap in Arc<Mutex<>>
 
-            println!("Client Mode: Connected.");
+            //println!("Client Mode: Connected.");
 
             let mut config = tun::Configuration::default();
             config.name("tun0");
@@ -285,11 +285,14 @@ async fn main() {
             let write_to_server = tokio::spawn(async move {
                 loop {
 
-                    println!("Write to Server: Reading from the tun0 to write data to Server");
+                    //println!("Write to Server: Reading from the tun0 to write data to Server");
 
                     let mut buf = vec![0u8; 4096];
                     match tun_device_for_write.lock().await.read(&mut buf) {
                         Ok(n) if n > 0 => {
+
+                            println!("Write to Server: Data read from tun0");
+
                             let encrypted_data = encrypt(&buf[..n]);
                             let packet = VpnPacket { data: encrypted_data };
                             let serialized_data = serialize(&packet).unwrap();
@@ -313,7 +316,7 @@ async fn main() {
             let tun_device_for_read = tun_device.clone();
             let read_from_server = tokio::spawn(async move {
                 loop {
-                    println!("Read from Server: Task for reading from the server initiated");
+                    //println!("Read from Server: Task for reading from the server initiated");
 
                     let mut buf = vec![0u8; 4096];
                     let mut locked_stream = stream_for_reading.lock().await;
@@ -321,7 +324,7 @@ async fn main() {
                     match locked_stream.read(&mut buf).await {
                         Ok(n) if n > 0 => {
 
-                            println!("Read from Server: N > 0");
+                            println!("Read from Server: Data received on TCP Stream");
 
                             let version = buf[0] >> 4;
 
