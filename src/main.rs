@@ -217,7 +217,7 @@ async fn main() {
 
         setup_tun_interface();
 
-        println!("Server listening...");
+        println!("Server Mode: Server listening...");
 
         let shutdown_signal = Arc::new(AtomicBool::new(false));
 
@@ -260,14 +260,14 @@ async fn main() {
 
     } else {
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
-            println!("Connecting to VPN server on {}", vpn_server_ip);
+            println!("Client Mode: Connecting to VPN server on {}", vpn_server_ip);
 
             // Use vpn_server_ip for setting up the client connection
             let server_address = format!("{}:12345", vpn_server_ip);
             let mut stream = TcpStream::connect(server_address).await.unwrap();
             let stream = Arc::new(Mutex::new(stream)); // Wrap in Arc<Mutex<>>
 
-            println!("Connected.");
+            println!("Client Mode: Connected.");
 
             let mut config = tun::Configuration::default();
             config.name("tun0");
@@ -285,7 +285,7 @@ async fn main() {
             let write_to_server = tokio::spawn(async move {
                 loop {
 
-                    println!("Reading from the tun0 to write data to Server");
+                    println!("Write to Server: Reading from the tun0 to write data to Server");
 
                     let mut buf = vec![0u8; 4096];
                     match tun_device_for_write.lock().await.read(&mut buf) {
@@ -297,13 +297,13 @@ async fn main() {
                             let mut locked_stream = stream_for_writing.lock().await;
                             let _ = locked_stream.write_all(&serialized_data).await;
 
-                            println!("Data sent to Server");
+                            println!("Write to Server: Data sent to Server");
                         }
                         Ok(_) => {
-                            println!("Nothing to read");
+                            println!("Write to Server: Nothing to read");
                         },
                         Err(e) => {
-                            eprintln!("Error reading from TUN device: {}", e);
+                            eprintln!("Write to Server: Error reading from TUN device: {}", e);
                         }
                     }
                 }
@@ -313,12 +313,10 @@ async fn main() {
             let tun_device_for_read = tun_device.clone();
             let read_from_server = tokio::spawn(async move {
                 loop {
-                    println!("Task for reading from the server initiated");
+                    println!("Read from Server: Task for reading from the server initiated");
 
                     let mut buf = vec![0u8; 4096];
                     let mut locked_stream = stream_for_reading.lock().await;
-
-                    println!("Reading from Server - line 301");
 
                     match locked_stream.read(&mut buf).await {
                         Ok(n) if n > 0 => {
@@ -334,11 +332,11 @@ async fn main() {
 
                                 if let Some(ip_header) = extract_ipv4_header(&decrypted_data) {
 
-                                    println!("Extracted IPV4 Header");
+                                    println!("Read from Server: Extracted IPV4 Header");
 
                                     if ip_header.protocol == 6 {
 
-                                        println!("Protocol == 6");
+                                        println!("Read from Server: Protocol == 6");
 
                                         if let Some(tcp_header) = extract_tcp_header(&packet.data[20..]) {
                                             match forward_packet_to_destination(&packet.data, IpAddress::V4(ip_header.daddr), tcp_header.dest_port) {
@@ -362,11 +360,11 @@ async fn main() {
 
                                 if let Some(ip_header) = extract_ipv6_header(&decrypted_data) {
 
-                                    println!("Extracted IPV6 Header");
+                                    println!("Read from Server: Extracted IPV6 Header");
 
                                     if ip_header.next_header == 6 {
 
-                                        println!("Protocol == 6");
+                                        println!("Read from Server: Protocol == 6");
 
                                         if let Some(tcp_header) = extract_tcp_header(&packet.data[20..]) {
                                             match forward_packet_to_destination(&packet.data, IpAddress::V6(ip_header.destination_address), tcp_header.dest_port) {
@@ -374,22 +372,22 @@ async fn main() {
                                                     let _ = tun_device_for_read.lock().await.write_all(&response);
                                                 },
                                                 Err(e) => {
-                                                    println!("Error forwarding packet: {}", e);
+                                                    println!("Read from Server: Error forwarding packet: {}", e);
                                                 }
                                             }
                                         }
                                     }
                                 }
                             } else {
-                                println!("Unknown IP version");
+                                println!("Read from Server: Unknown IP version");
                                 continue;
                             }
                         }
                         Ok(_) => {
-                            println!("Reading from the server: N = 0");
+                            println!("Read from Server: N = 0");
                         }
                         Err(e) => {
-                            eprintln!("Error reading from server: {:?}", e);
+                            eprintln!("Read from Server: Error reading from server: {:?}", e);
                             break;
                         }
                     }
@@ -482,6 +480,9 @@ struct Ipv6Header {
 }
 
 fn extract_ipv6_header(data: &[u8]) -> Option<Ipv6Header> {
+
+    println!("Extracting IPv6 Header");
+
     if data.len() < 40 {  // IPv6 header is 40 bytes
         return None;
     }
