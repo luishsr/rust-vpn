@@ -279,20 +279,26 @@ async fn main() {
             let write_to_server = tokio::spawn(async move {
                 loop {
 
-                    println!("Writing data to Server");
+                    println!("Reading from the tun0 to write data to Server");
 
                     let mut buf = vec![0u8; 4096];
-                    let n = tun_device_for_write.lock().await.read(&mut buf).unwrap();
-                    if n > 0 {
-                        let encrypted_data = encrypt(&buf[..n]);
-                        let packet = VpnPacket { data: encrypted_data };
-                        let serialized_data = serialize(&packet).unwrap();
+                    match tun_device_for_write.lock().await.read(&mut buf) {
+                        Ok(n) if n > 0 => {
+                            let encrypted_data = encrypt(&buf[..n]);
+                            let packet = VpnPacket { data: encrypted_data };
+                            let serialized_data = serialize(&packet).unwrap();
 
-                        let mut locked_stream = stream_for_writing.lock().await;
-                        let _ = locked_stream.write_all(&serialized_data).await;
+                            let mut locked_stream = stream_for_writing.lock().await;
+                            let _ = locked_stream.write_all(&serialized_data).await;
 
-                        println!("Data sent to Server");
-
+                            println!("Data sent to Server");
+                        }
+                        Ok(_) => {
+                            println!("Nothing to read");
+                        },
+                        Err(e) => {
+                            eprintln!("Error reading from TUN device: {}", e);
+                        }
                     }
                 }
             });
