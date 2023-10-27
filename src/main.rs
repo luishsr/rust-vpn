@@ -57,6 +57,12 @@ struct VpnPacket {
     data: Vec<u8>,
 }
 
+#[derive(Debug)]
+enum IpAddress {
+    V4([u8; 4]),
+    V6([u8; 16]),
+}
+
 async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result<()> {
 
     // Get the peer address and print it
@@ -317,43 +323,71 @@ async fn main() {
                     match locked_stream.read(&mut buf).await {
                         Ok(n) if n > 0 => {
 
-                            println!("Ok(n) if n > 0 is TRUE");
+                            let version = buf[0] >> 4;
 
+                            // Handle IPv4 packets
+                            if version == 4 {
+                                let mut packet: VpnPacket = deserialize(&buf[..n]).unwrap();
+                                let decrypted_data = decrypt(&packet.data);
 
-                            let mut packet: VpnPacket = deserialize(&buf[..n]).unwrap();
-                            let decrypted_data = decrypt(&packet.data);
+                                packet.data.truncate(n);
 
-                            // TODO: Implement forward and response
-                            //////// ADD FORWARDING LOGIC HERE ///////////////
+                                if let Some(ip_header) = extract_ipv4_header(&decrypted_data) {
 
+                                    println!("Extracted IPV4 Header");
 
-                            packet.data.truncate(n);
+                                    if ip_header.protocol == 6 {
 
-                            if let Some(ip_header) = extract_ipv4_header(&decrypted_data) {
+                                        println!("Protocol == 6");
 
-                                println!("Extracted IPV4 Header");
-
-                                if ip_header.protocol == 6 {
-
-                                    println!("Protocol == 6");
-
-                                    if let Some(tcp_header) = extract_tcp_header(&packet.data[20..]) {
-                                        match forward_packet_to_destination(&packet.data, ip_header.daddr, tcp_header.dest_port) {
-                                            Ok(response) => {
-                                                let _ = tun_device_for_read.lock().await.write_all(&response);
-                                            },
-                                            Err(e) => {
-                                                println!("Error forwarding packet: {}", e);
+                                        if let Some(tcp_header) = extract_tcp_header(&packet.data[20..]) {
+                                            match forward_packet_to_destination(&packet.data, IpAddress::V4(ip_header.daddr), tcp_header.dest_port) {
+                                                Ok(response) => {
+                                                    let _ = tun_device_for_read.lock().await.write_all(&response);
+                                                },
+                                                Err(e) => {
+                                                    println!("Error forwarding packet: {}", e);
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            // Handle IPv6 packets
+                            else if version == 6 {
+                                let mut packet: VpnPacket = deserialize(&buf[..n]).unwrap();
+                                let decrypted_data = decrypt(&packet.data);
 
-                            ///////// END OF FORWARD LOGIC ///////
+                                packet.data.truncate(n);
 
+                                if let Some(ip_header) = extract_ipv6_header(&decrypted_data) {
+
+                                    println!("Extracted IPV6 Header");
+
+                                    if ip_header.next_header == 6 {
+
+                                        println!("Protocol == 6");
+
+                                        if let Some(tcp_header) = extract_tcp_header(&packet.data[20..]) {
+                                            match forward_packet_to_destination(&packet.data, IpAddress::V6(ip_header.destination_address), tcp_header.dest_port) {
+                                                Ok(response) => {
+                                                    let _ = tun_device_for_read.lock().await.write_all(&response);
+                                                },
+                                                Err(e) => {
+                                                    println!("Error forwarding packet: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                println!("Unknown IP version");
+                                continue;
+                            }
                         }
-                        Ok(_) => {}
+                        Ok(_) => {
+                            println!("Reading from the server: N = 0");
+                        }
                         Err(e) => {
                             eprintln!("Error reading from server: {:?}", e);
                             break;
@@ -435,14 +469,66 @@ fn extract_tcp_header(packet: &[u8]) -> Option<TcpHeader> {
     })
 }
 
-fn forward_packet_to_destination(packet: &[u8], dest_ip: [u8; 4], dest_port: u16) -> Result<Vec<u8>, Box<dyn StdError + Send>> {
-    println!("Server forwarding packet to destination {:?}", dest_ip);
+#[derive(Debug)]
+struct Ipv6Header {
+    version: u8,
+    traffic_class: u8,
+    flow_label: u32,
+    payload_length: u16,
+    next_header: u8,
+    hop_limit: u8,
+    source_address: [u8; 16],
+    destination_address: [u8; 16],
+}
+
+fn extract_ipv6_header(data: &[u8]) -> Option<Ipv6Header> {
+    if data.len() < 40 {  // IPv6 header is 40 bytes
+        return None;
+    }
+
+    let version = data[0] >> 4;
+    let traffic_class = ((data[0] & 0x0F) << 4) | (data[1] >> 4);
+    let flow_label = ((data[1] as u32 & 0x0F) << 16) | (data[2] as u32) << 8 | data[3] as u32;
+    let payload_length = u16::from_be_bytes([data[4], data[5]]);
+    let next_header = data[6];
+    let hop_limit = data[7];
+    let source_address = [
+        data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
+        data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
+    ];
+    let destination_address = [
+        data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
+        data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
+    ];
+
+    Some(Ipv6Header {
+        version,
+        traffic_class,
+        flow_label,
+        payload_length,
+        next_header,
+        hop_limit,
+        source_address,
+        destination_address,
+    })
+}
+
+fn forward_packet_to_destination(packet: &[u8], dest_ip: IpAddress, dest_port: u16) -> Result<Vec<u8>, Box<dyn StdError + Send>> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(|e| Box::new(e) as Box<dyn StdError + Send>)?;
-    let address_string = format!("{}.{}.{}.{}:{}", dest_ip[0], dest_ip[1], dest_ip[2], dest_ip[3], dest_port);
+
+    let address_string = match dest_ip {
+        IpAddress::V4(ipv4) => format!("{}.{}.{}.{}:{}", ipv4[0], ipv4[1], ipv4[2], ipv4[3], dest_port),
+        IpAddress::V6(ipv6) => format!("{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{}",
+                                       ipv6[0], ipv6[1], ipv6[2], ipv6[3],
+                                       ipv6[4], ipv6[5], ipv6[6], ipv6[7], dest_port),
+    };
+
     let address: SocketAddr = address_string.parse().unwrap();
 
-    socket.send_to(packet, &address.into()).map_err(|e| Box::new(e) as Box<dyn StdError + Send>)?;
+    println!("Server forwarding packet to destination {:?}", dest_ip);
 
+
+    socket.send_to(packet, &address.into()).map_err(|e| Box::new(e) as Box<dyn StdError + Send>)?;
 
     let mut response = vec![0u8; 4096];
     let mut uninitialized: [MaybeUninit<u8>; 4096] = unsafe { MaybeUninit::uninit().assume_init() };
