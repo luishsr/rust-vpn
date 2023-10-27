@@ -257,6 +257,7 @@ async fn main() {
         signal_listener.await.expect("Signal listener task failed");
 
     } else {
+        // CLIENT MODE
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
             let server_address = format!("{}:12345", vpn_server_ip);
 
@@ -303,13 +304,13 @@ async fn main() {
             let cloned_stream_for_write = stream.clone();
             let read_channel_write_server = tokio::spawn(async move {
                 while let Some(serialized_data) = rx.recv().await {
-                    println!("Read from Server: Locking stream for writing");
+                    println!("Read from Server (channel): Locking stream for writing");
                     let mut locked_stream = cloned_stream_for_write.lock().await;
-                    println!("Read from Server: Stream locked");
+                    println!("Read from Server (channel): Stream locked");
                     let (_, mut writer) = locked_stream.split();
-                    println!("Read from Server: Writing serialized data to the stream");
+                    println!("Read from Server (channel): Writing serialized data to the stream");
                     writer.write_all(&serialized_data).await.expect("Failed to write to server");
-                    println!("Read from Server: Serialized data sent.");
+                    println!("Read from Server (channel): Serialized data sent.");
                 }
             });
 
