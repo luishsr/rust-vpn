@@ -299,6 +299,11 @@ async fn main() {
                         Ok(n) if n > 0 => {
                             let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
                             let decrypted_data = decrypt(&packet.data);
+
+                            // TODO: Implement forward and response
+                            //////// ADD FORWARDING LOGIC HERE ///////////////
+
+
                             let _ = tun_device_for_read.lock().await.write_all(&decrypted_data);
                         }
                         Ok(_) => {}
