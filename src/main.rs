@@ -66,9 +66,7 @@ enum IpAddress {
 async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result<()> {
 
     // Get the peer address and print it
-    let peer_address = stream.peer_addr().unwrap_or_else(|_| "Unknown peer".to_string().parse().unwrap());
-
-    println!("Client {} connected to the VPN.", peer_address);
+    //let peer_address = stream.peer_addr().unwrap_or_else(|_| "Unknown peer".to_string().parse().unwrap());
 
     let mut buf = vec![0u8; 4096];
 
@@ -294,10 +292,19 @@ async fn main() {
                             println!("Write to Server: Data read from tun0");
 
                             let encrypted_data = encrypt(&buf[..n]);
+
+                            println!("Write to Server: Data Encrypted");
+
                             let packet = VpnPacket { data: encrypted_data };
+
                             let serialized_data = serialize(&packet).unwrap();
 
+                            println!("Write to Server: Locking stream for writing");
+
                             let mut locked_stream = stream_for_writing.lock().await;
+
+                            println!("Write to Server: Stream for writing locked");
+
                             let _ = locked_stream.write_all(&serialized_data).await;
 
                             println!("Write to Server: Data sent to Server");
