@@ -336,6 +336,7 @@ async fn main() {
             set_client_ip_and_route();
 
             let reader_stream_clone = Arc::clone(&stream); // Clone the stream for the second task
+
             tokio::spawn(async move {
                 loop {
                     let mut buf = vec![0u8; 4096];
@@ -354,6 +355,10 @@ async fn main() {
                     };
                 }
             });
+
+            println!("Client Mode: Press Ctrl+C to exit.");
+            tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl_c");
+            println!("Exiting...");
 
         } else {
             eprintln!("The vpn-server IP address is required for client mode!");
