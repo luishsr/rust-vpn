@@ -256,43 +256,96 @@ async fn main() {
         // Optionally, you can wait for the signal_listener to complete
         signal_listener.await.expect("Signal listener task failed");
 
-    } else {
-        // CLIENT MODE
+    } else { // Start of CLIENT MODE
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
             let server_address = format!("{}:12345", vpn_server_ip);
 
-            // Open a connection to the server
+            // Wrap the TcpStream inside an Arc to allow shared ownership.
             let stream = Arc::new(Mutex::new(TcpStream::connect(server_address).await.unwrap()));
 
-            // Client mode setup
+            // Channel for sending serialized data to the writer task
+            let (send_to_writer_tx, mut send_to_writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+
+            // Writer task
+            let writer_stream = Arc::clone(&stream);
+            tokio::spawn(async move {
+                let mut locked_stream = writer_stream.lock().await;
+                while let Some(data) = send_to_writer_rx.recv().await {
+                    locked_stream.write_all(&data).await.expect("Failed to write to server");
+                }
+            });
+
+            // Reader task
+            let reader_stream = Arc::clone(&stream);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let mut locked_stream = reader_stream.lock().await;
+
+                while let Ok(n) = locked_stream.read(&mut buf).await {
+                    if n == 0 { break; }  // Connection closed
+                    let version = buf[0] >> 4;
+
+                    // Handle IPv4 packets
+                    if version == 4 {
+                        let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
+                        let decrypted_data = decrypt(&packet.data);
+                        if let Some(ip_header) = extract_ipv4_header(&decrypted_data) {
+                            if ip_header.protocol == 6 {  // TCP
+                                if let Some(tcp_header) = extract_tcp_header(&decrypted_data[20..]) {
+                                    match forward_packet_to_destination(&decrypted_data, IpAddress::V4(ip_header.daddr), tcp_header.dest_port) {
+                                        Ok(response) => {
+                                            // TODO: Handle writing the response to TUN
+                                        },
+                                        Err(e) => {
+                                            println!("Error forwarding IPv4 packet: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Handle IPv6 packets
+                    else if version == 6 {
+                        let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
+                        let decrypted_data = decrypt(&packet.data);
+                        if let Some(ipv6_header) = extract_ipv6_header(&decrypted_data) {
+                            if ipv6_header.next_header == 6 {  // TCP
+                                if let Some(tcp_header) = extract_tcp_header(&decrypted_data[40..]) {  // Offset is different for IPv6
+                                    match forward_packet_to_destination(&decrypted_data, IpAddress::V6(ipv6_header.destination_address), tcp_header.dest_port) {
+                                        Ok(response) => {
+                                            // TODO: Handle writing the response to TUN
+                                        },
+                                        Err(e) => {
+                                            println!("Error forwarding IPv6 packet: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        println!("Unknown IP version");
+                    }
+                }
+            });
+
             let mut config = tun::Configuration::default();
             config.name("tun0");
-            let tun_device = Arc::new(Mutex::new(tun::create(&config).unwrap()));
+            let tun_device = Arc::new(tun::create(&config).unwrap());
+
+            // Client mode setup
             set_client_ip_and_route();
 
-            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-
-            // Task for reading from the TUN and sending data to the server
-            let tun_device_for_write = tun_device.clone();
-            let stream_for_write = stream.clone();
-            let cloned_stream_for_read = stream.clone();
-
-            let write_to_server = tokio::spawn(async move {
+            let reader_stream_clone = Arc::clone(&stream); // Clone the stream for the second task
+            tokio::spawn(async move {
                 loop {
                     let mut buf = vec![0u8; 4096];
-                    println!("Write to Server: Locking tun0 for write");
-                    // Task for reading from the TUN and writing to the server
-                    match tun_device_for_write.lock().await.read(&mut buf) {
+                    let mut locked_stream = reader_stream_clone.lock().await;
+                    match locked_stream.read(&mut buf).await {
                         Ok(n) if n > 0 => {
-                            println!("Write to Server: Data read from tun0.");
                             let encrypted_data = encrypt(&buf[..n]);
                             let packet = VpnPacket { data: encrypted_data };
                             let serialized_data = serialize(&packet).unwrap();
-
-                            // Send serialized data to the channel
-                            let mut locked_stream = stream_for_write.lock().await;
-                            let (_, mut writer) = locked_stream.split();
-                            writer.write_all(&serialized_data).await.expect("Failed to write to server");
+                            send_to_writer_tx.send(serialized_data).await.expect("Failed to send to writer");
                         },
                         Ok(_) => {},
                         Err(e) => {
@@ -302,120 +355,6 @@ async fn main() {
                 }
             });
 
-            // Task for reading data from the channel and writing to the server
-            let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
-
-            // Dedicated writer task
-            tokio::spawn(async move {
-                let mut locked_stream = stream.lock().await;
-                let (_, mut writer) = locked_stream.split();
-                while let Some(serialized_data) = write_rx.recv().await {
-                    println!("Read from Server (channel): Writing serialized data to the stream");
-                    writer.write_all(&serialized_data).await.expect("Failed to write to server");
-                    println!("Read from Server (channel): Serialized data sent.");
-                }
-            });
-
-            // Reading task
-            tokio::spawn(async move {
-                while let Some(serialized_data) = rx.recv().await {
-                    println!("Read from Server (channel): Sending serialized data to writer task");
-                    write_tx.send(serialized_data).await.expect("Failed to send data to writer task");
-                }
-            });
-
-            // Task for reading from the server and writing to TUN
-            let tun_device_for_read = tun_device.clone();
-
-            let read_from_server = tokio::spawn(async move {
-                loop {
-                    let mut buf = vec![0u8; 4096];
-                    println!("Read from Server: Locking stream for reading");
-                    let mut locked_stream = cloned_stream_for_read.lock().await;
-                    println!("Read from Server: Reading stream locked.");
-                    println!("Read from Server: Spliting locked stream");
-                    let (mut reader, _) = locked_stream.split();
-                    println!("Read from Server: Stream split.");
-                    match reader.read(&mut buf).await {
-                        Ok(n) if n > 0 => {
-
-                            println!("Read from Server: Data received on TCP Stream");
-
-                            let version = buf[0] >> 4;
-
-                            // Handle IPv4 packets
-                            if version == 4 {
-                                let mut packet: VpnPacket = deserialize(&buf[..n]).unwrap();
-                                let decrypted_data = decrypt(&packet.data);
-
-                                packet.data.truncate(n);
-
-                                if let Some(ip_header) = extract_ipv4_header(&decrypted_data) {
-
-                                    println!("Read from Server: Extracted IPV4 Header");
-
-                                    if ip_header.protocol == 6 {
-
-                                        println!("Read from Server: Protocol == 6");
-
-                                        if let Some(tcp_header) = extract_tcp_header(&packet.data[20..]) {
-                                            match forward_packet_to_destination(&packet.data, IpAddress::V4(ip_header.daddr), tcp_header.dest_port) {
-                                                Ok(response) => {
-                                                    let _ = tun_device_for_read.lock().await.write_all(&response);
-                                                },
-                                                Err(e) => {
-                                                    println!("Error forwarding packet: {}", e);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            // Handle IPv6 packets
-                            else if version == 6 {
-                                let mut packet: VpnPacket = deserialize(&buf[..n]).unwrap();
-                                let decrypted_data = decrypt(&packet.data);
-
-                                packet.data.truncate(n);
-
-                                if let Some(ip_header) = extract_ipv6_header(&decrypted_data) {
-
-                                    println!("Read from Server: Extracted IPV6 Header");
-
-                                    if ip_header.next_header == 6 {
-
-                                        println!("Read from Server: Protocol == 6");
-
-                                        if let Some(tcp_header) = extract_tcp_header(&packet.data[20..]) {
-                                            match forward_packet_to_destination(&packet.data, IpAddress::V6(ip_header.destination_address), tcp_header.dest_port) {
-                                                Ok(response) => {
-                                                    let _ = tun_device_for_read.lock().await.write_all(&response);
-                                                },
-                                                Err(e) => {
-                                                    println!("Read from Server: Error forwarding packet: {}", e);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                println!("Read from Server: Unknown IP version");
-                                continue;
-                            }
-                        }
-                        Ok(_) => {
-                            println!("Read from Server: N = 0");
-                        }
-                        Err(e) => {
-                            eprintln!("Read from Server: Error reading from server: {:?}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-
-            // Wait for the tasks to complete
-            let _ = tokio::try_join!(write_to_server, read_from_server);
         } else {
             eprintln!("The vpn-server IP address is required for client mode!");
             return;
