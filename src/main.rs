@@ -258,14 +258,11 @@ async fn main() {
 
     } else {
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
-            //println!("Client Mode: Connecting to VPN server on {}", vpn_server_ip);
-
-            // Use vpn_server_ip for setting up the client connection
             let server_address = format!("{}:12345", vpn_server_ip);
-            let mut stream = TcpStream::connect(server_address).await.unwrap();
-            let stream = Arc::new(Mutex::new(stream)); // Wrap in Arc<Mutex<>>
 
-            //println!("Client Mode: Connected.");
+            // Open a connection to the server
+            let mut stream = TcpStream::connect(server_address).await.unwrap();
+            let stream = Arc::new(Mutex::new(stream));
 
             let mut config = tun::Configuration::default();
             config.name("tun0");
@@ -275,60 +272,51 @@ async fn main() {
             // Client mode setup
             set_client_ip_and_route();
 
-            // Clone the Arc reference for each task
-            let stream_for_writing = stream.clone();
-            let stream_for_reading = stream.clone();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
+            // Task for reading from the TUN and writing to the server
             let tun_device_for_write = tun_device.clone();
+
             let write_to_server = tokio::spawn(async move {
                 loop {
-
-                    //println!("Write to Server: Reading from the tun0 to write data to Server");
-
                     let mut buf = vec![0u8; 4096];
                     match tun_device_for_write.lock().await.read(&mut buf) {
                         Ok(n) if n > 0 => {
-
-                            println!("Write to Server: Data read from tun0");
-
                             let encrypted_data = encrypt(&buf[..n]);
-
-                            println!("Write to Server: Data Encrypted");
-
                             let packet = VpnPacket { data: encrypted_data };
-
                             let serialized_data = serialize(&packet).unwrap();
 
-                            println!("Write to Server: Locking stream for writing");
-
-                            let mut locked_stream = stream_for_writing.lock().await;
-
-                            println!("Write to Server: Stream for writing locked");
-
-                            let _ = locked_stream.write_all(&serialized_data).await;
-
-                            println!("Write to Server: Data sent to Server");
-                        }
-                        Ok(_) => {
-                            println!("Write to Server: Nothing to read");
+                            // Send serialized data to the channel
+                            tx.send(serialized_data).await.expect("Failed to send to channel");
                         },
+                        Ok(_) => {},
                         Err(e) => {
-                            eprintln!("Write to Server: Error reading from TUN device: {}", e);
+                            eprintln!("Error reading from TUN device: {}", e);
                         }
                     }
                 }
             });
 
+            // Task for reading data from the channel and writing to the server
+            let cloned_stream_for_write = stream.clone();
+            let read_channel_write_server = tokio::spawn(async move {
+                while let Some(serialized_data) = rx.recv().await {
+                    let mut locked_stream = cloned_stream_for_write.lock().await;
+                    let (_, mut writer) = locked_stream.split();
+                    writer.write_all(&serialized_data).await.expect("Failed to write to server");
+                }
+            });
+
             // Task for reading from the server and writing to TUN
             let tun_device_for_read = tun_device.clone();
+            let cloned_stream_for_read = stream.clone();
+
             let read_from_server = tokio::spawn(async move {
                 loop {
-                    //println!("Read from Server: Task for reading from the server initiated");
-
                     let mut buf = vec![0u8; 4096];
-                    let mut locked_stream = stream_for_reading.lock().await;
-
-                    match locked_stream.read(&mut buf).await {
+                    let mut locked_stream = cloned_stream_for_read.lock().await;
+                    let (mut reader, _) = locked_stream.split();
+                    match reader.read(&mut buf).await {
                         Ok(n) if n > 0 => {
 
                             println!("Read from Server: Data received on TCP Stream");
@@ -407,7 +395,7 @@ async fn main() {
             });
 
             // Wait for the tasks to complete
-            let _ = tokio::try_join!(write_to_server, read_from_server);
+            let _ = tokio::try_join!(write_to_server, read_channel_write_server , read_from_server);
         } else {
             eprintln!("The vpn-server IP address is required for client mode!");
             return;
