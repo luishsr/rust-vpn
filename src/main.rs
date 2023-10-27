@@ -262,20 +262,20 @@ async fn main() {
             let server_address = format!("{}:12345", vpn_server_ip);
 
             // Open a connection to the server
-            let mut stream = TcpStream::connect(server_address).await.unwrap();
-            let stream = Arc::new(Mutex::new(stream));
-
-            let mut config = tun::Configuration::default();
-            config.name("tun0");
-
-            let tun_device = Arc::new(Mutex::new(tun::create(&config).unwrap()));
+            let stream = Arc::new(Mutex::new(TcpStream::connect(server_address).await.unwrap()));
 
             // Client mode setup
+            let mut config = tun::Configuration::default();
+            config.name("tun0");
+            let tun_device = Arc::new(Mutex::new(tun::create(&config).unwrap()));
             set_client_ip_and_route();
 
             let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
+            // Task for reading from the TUN and sending data to the server
             let tun_device_for_write = tun_device.clone();
+            let stream_for_write = stream.clone();
+            let cloned_stream_for_read = stream.clone();
 
             let write_to_server = tokio::spawn(async move {
                 loop {
@@ -290,7 +290,9 @@ async fn main() {
                             let serialized_data = serialize(&packet).unwrap();
 
                             // Send serialized data to the channel
-                            tx.send(serialized_data).await.expect("Failed to send to channel");
+                            let mut locked_stream = stream_for_write.lock().await;
+                            let (_, mut writer) = locked_stream.split();
+                            writer.write_all(&serialized_data).await.expect("Failed to write to server");
                         },
                         Ok(_) => {},
                         Err(e) => {
@@ -301,22 +303,29 @@ async fn main() {
             });
 
             // Task for reading data from the channel and writing to the server
-            let cloned_stream_for_write = stream.clone();
-            let read_channel_write_server = tokio::spawn(async move {
-                while let Some(serialized_data) = rx.recv().await {
-                    println!("Read from Server (channel): Locking stream for writing");
-                    let mut locked_stream = cloned_stream_for_write.lock().await;
-                    println!("Read from Server (channel): Stream locked");
-                    let (_, mut writer) = locked_stream.split();
+            let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+
+            // Dedicated writer task
+            tokio::spawn(async move {
+                let mut locked_stream = stream.lock().await;
+                let (_, mut writer) = locked_stream.split();
+                while let Some(serialized_data) = write_rx.recv().await {
                     println!("Read from Server (channel): Writing serialized data to the stream");
                     writer.write_all(&serialized_data).await.expect("Failed to write to server");
                     println!("Read from Server (channel): Serialized data sent.");
                 }
             });
 
+            // Reading task
+            tokio::spawn(async move {
+                while let Some(serialized_data) = rx.recv().await {
+                    println!("Read from Server (channel): Sending serialized data to writer task");
+                    write_tx.send(serialized_data).await.expect("Failed to send data to writer task");
+                }
+            });
+
             // Task for reading from the server and writing to TUN
             let tun_device_for_read = tun_device.clone();
-            let cloned_stream_for_read = stream.clone();
 
             let read_from_server = tokio::spawn(async move {
                 loop {
@@ -406,7 +415,7 @@ async fn main() {
             });
 
             // Wait for the tasks to complete
-            let _ = tokio::try_join!(write_to_server, read_channel_write_server);
+            let _ = tokio::try_join!(write_to_server, read_from_server);
         } else {
             eprintln!("The vpn-server IP address is required for client mode!");
             return;
