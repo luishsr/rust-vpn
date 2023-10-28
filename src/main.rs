@@ -235,6 +235,15 @@ fn handle_client(client_id: usize, mut stream: TcpStream, clients: Arc<Mutex<Has
 }
 
 fn server_mode() {
+    // Existing server logic
+    let listener = TcpListener::bind("0.0.0.0:8080").unwrap();
+    let clients: Arc<Mutex<HashMap<usize, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    let mut config = tun::Configuration::default();
+    config.name("tun0");
+    let tun_device = tun::create(&config).unwrap();
+    let shared_tun = Arc::new(Mutex::new(tun_device));
+
     // Setup the tun0 interface
     if let Err(e) = setup_tun_interface() {
         eprintln!("Failed to set up TUN interface: {}", e);
@@ -243,10 +252,6 @@ fn server_mode() {
 
     // Set the client's IP and routing
     set_client_ip_and_route();
-
-    // Existing server logic
-    let listener = TcpListener::bind("0.0.0.0:8080").unwrap();
-    let clients: Arc<Mutex<HashMap<usize, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
 
     println!("Server started on 0.0.0.0:8080");
 
