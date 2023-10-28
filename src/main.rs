@@ -250,9 +250,6 @@ fn server_mode() {
         return;
     }
 
-    // Set the client's IP and routing
-    set_client_ip_and_route();
-
     println!("Server started on 0.0.0.0:8080");
 
     for (client_id, stream) in listener.incoming().enumerate() {
@@ -317,6 +314,9 @@ async fn read_from_client_and_write_to_tun(mut client: TcpStream, mut tun: Devic
 fn client_mode(vpn_server_ip: &str) {
     // Basic client mode for demonstration
     let mut stream = TcpStream::connect(vpn_server_ip).unwrap();
+
+    // Set the client's IP and routing
+    set_client_ip_and_route();
 
     println!("Connected to the server {}", vpn_server_ip);
 
