@@ -11,8 +11,9 @@ use generic_array::GenericArray;
 use aes_gcm::{Aes256Gcm, KeyInit};
 use std::process::Command;
 use aes_gcm::aead::Aead;
+use env_logger::Builder;
 use tun::platform::Device;
-use log::{error, info};
+use log::{error, info, LevelFilter};
 
 
 const KEY: [u8; 32] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
@@ -342,8 +343,10 @@ fn client_mode(vpn_server_ip: &str) {
 
 fn main() {
 
-    // Initialize the logger
-    env_logger::init();
+    // Initialize the logger with 'info' as the default level
+    Builder::new()
+        .filter(None, LevelFilter::Info)
+        .init();
 
     let matches = App::new("Simple VPN")
         .version("1.0")
