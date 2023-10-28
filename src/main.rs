@@ -257,12 +257,25 @@ fn server_mode() {
 
     let tun_device_clone = shared_tun.clone();
     let clients_clone = clients.clone();
-    thread::spawn(move || {
-        let client_clone = clients_clone.lock().unwrap().get(&0).unwrap().try_clone().unwrap(); // Just for demonstration. This should be improved.
-        let mut locked_tun = tun_device_clone.lock().unwrap();
-        read_from_tun_and_send_to_client(&mut *locked_tun, client_clone);
-    });
 
+    thread::spawn(move || {
+        let clients_guard = clients_clone.lock().unwrap();
+
+        if let Some(client) = clients_guard.get(&0) {
+            if let Ok(client_clone) = client.try_clone() {
+                drop(clients_guard);  // Unlock the mutex early
+
+                let mut locked_tun = tun_device_clone.lock().unwrap();
+                read_from_tun_and_send_to_client(&mut *locked_tun, client_clone);
+            } else {
+                // Handle error while trying to clone the TcpStream
+                println!("Failed to clone client TcpStream");
+            }
+        } else {
+            // Handle the case where the client doesn't exist
+            println!("No client with key 0 found");
+        }
+    });
 
     for (client_id, stream) in listener.incoming().enumerate() {
         match stream {
