@@ -280,6 +280,17 @@ fn server_mode() {
         match stream {
             Ok(stream) => {
                 info!("New client connected with ID: {}", client_id); // This line is added
+
+                if client_id == 0 {  // For now, only starting TUN data handling for the first client
+                    let tun_device_clone = shared_tun.clone();
+                    let clients_clone = clients.clone();
+
+                    thread::spawn(move || {
+                        let client_clone = clients_clone.lock().unwrap().get(&0).unwrap().try_clone().unwrap();
+                        let mut locked_tun = tun_device_clone.lock().unwrap();
+                        read_from_tun_and_send_to_client(&mut *locked_tun, client_clone);
+                    });
+                }
                 clients.lock().unwrap().insert(client_id, stream.try_clone().unwrap());
                 let clients_arc = clients.clone();
                 thread::spawn(move || handle_client(client_id, stream, clients_arc));
