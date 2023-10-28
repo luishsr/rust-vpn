@@ -373,7 +373,8 @@ fn client_mode(vpn_server_ip: &str) {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn  main() {
 
     // Initialize the logger with 'info' as the default level
     Builder::new()
