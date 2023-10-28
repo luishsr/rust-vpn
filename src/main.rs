@@ -236,7 +236,7 @@ fn handle_client(client_id: usize, mut stream: TcpStream, clients: Arc<Mutex<Has
 
 fn server_mode() {
     // Existing server logic
-    let listener = TcpListener::bind("0.0.0.0:8080").unwrap();
+    let listener = TcpListener::bind("0.0.0.0:12345").unwrap();
     let clients: Arc<Mutex<HashMap<usize, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let mut config = tun::Configuration::default();
@@ -315,6 +315,10 @@ fn client_mode(vpn_server_ip: &str) {
     // Basic client mode for demonstration
     let mut stream = TcpStream::connect(vpn_server_ip).unwrap();
 
+    let mut config = tun::Configuration::default();
+    config.name("tun0");
+    let tun_device = tun::create(&config).unwrap();
+
     // Set the client's IP and routing
     set_client_ip_and_route();
 
@@ -356,7 +360,8 @@ fn main() {
         server_mode();
     } else {
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
-            client_mode(vpn_server_ip);
+            let server_address = format!("{}:12345", vpn_server_ip);
+            client_mode(server_address.as_str());
         } else {
             eprintln!("Error: For client mode, you must provide the '--vpn-server' argument.");
         }
