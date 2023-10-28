@@ -12,6 +12,7 @@ use aes_gcm::{Aes256Gcm, KeyInit};
 use std::process::Command;
 use aes_gcm::aead::Aead;
 use tun::platform::Device;
+use log::{error, info};
 
 
 const KEY: [u8; 32] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
@@ -280,12 +281,14 @@ fn read_from_tun_and_send_to_client<T: tun::Device>(mut tun: T, mut client: TcpS
             match encrypt(&buffer[..n]) {
                 Ok(encrypted_data) => {
                     // Handle sending the encrypted data to the client
+                    info!("Received {} bytes from TUN device.", n);
 
                     let vpn_packet = VpnPacket { data: encrypted_data };
                     // Serialize and send to client
                     let serialized_data = bincode::serialize(&vpn_packet).unwrap();
-                    client.write_all(&serialized_data).unwrap();
 
+                    client.write_all(&serialized_data).unwrap();
+                    info!("Forwarded {} bytes to destination.", n);
 
                 },
                 Err(err_msg) => {
@@ -338,6 +341,10 @@ fn client_mode(vpn_server_ip: &str) {
 }
 
 fn main() {
+
+    // Initialize the logger
+    env_logger::init();
+
     let matches = App::new("Simple VPN")
         .version("1.0")
         .author("Luis Soares")
