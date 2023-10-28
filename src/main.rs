@@ -1,31 +1,17 @@
-extern crate serde_derive;
-extern crate tun;
-
-use std::error::Error;
-use std::io::Read;
-use anyhow::Result;
-use std::io::Write;
-use std::mem::MaybeUninit;
-use std::net::SocketAddr;
-use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use aes_gcm::{Aes256Gcm, KeyInit};
-use aes_gcm::aead::Aead;
-use aes_gcm::aes::cipher::{BlockDecrypt, BlockEncrypt};
-use aes_soft::cipher::NewStreamCipher;
-use bincode::{config, deserialize, serialize};
-use block_modes::{BlockMode, Cbc};
 use clap::{App, Arg};
+use std::net::{TcpListener, TcpStream, Shutdown};
+use std::thread;
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::error::Error;
+use serde_derive::Serialize;
+use serde_derive::Deserialize;
 use generic_array::GenericArray;
-use rand::Rng;
-use std::error::Error as StdError;
-use serde_derive::{Deserialize, Serialize};
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
-use tun::platform::{Configuration, Device};
+use aes_gcm::{Aes256Gcm, KeyInit};
+use std::process::Command;
+use aes_gcm::aead::Aead;
+use tun::platform::Device;
 
 
 const KEY: [u8; 32] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
@@ -34,15 +20,16 @@ const KEY: [u8; 32] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
     0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
 const NONCE: [u8; 12] = [0; 12];  // Using a constant nonce for simplicity; in a real application, each nonce should be unique
 
-fn encrypt(data: &[u8]) -> Vec<u8> {
+fn encrypt(data: &[u8]) -> Result<Vec<u8>, String> {
     let key = GenericArray::from_slice(&KEY);
     let nonce = GenericArray::from_slice(&NONCE);
     let cipher = Aes256Gcm::new(key);
 
-    let ciphertext = cipher.encrypt(nonce, data.as_ref()).expect("encryption failure!");
-    ciphertext
+    match cipher.encrypt(nonce, data.as_ref()) {
+        Ok(ciphertext) => Ok(ciphertext),
+        Err(_) => Err("Encryption failure!".to_string())
+    }
 }
-
 fn decrypt(encrypted_data: &[u8]) -> Vec<u8> {
     let key = GenericArray::from_slice(&KEY);
     let nonce = GenericArray::from_slice(&NONCE);
@@ -61,48 +48,6 @@ struct VpnPacket {
 enum IpAddress {
     V4([u8; 4]),
     V6([u8; 16]),
-}
-
-async fn handle_client(mut stream: TcpStream, tun: Arc<Mutex<Device>>) -> Result<()> {
-
-    // Get the peer address and print it
-    //let peer_address = stream.peer_addr().unwrap_or_else(|_| "Unknown peer".to_string().parse().unwrap());
-
-    let mut buf = vec![0u8; 4096];
-
-    loop {
-        match stream.read(&mut buf).await {
-            Ok(n) if n > 0 => {
-                let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
-
-                println!("Packet received on VPN Server {:?}", packet.data);
-
-                let mut locked_tun = tun.lock().await;
-
-                println!("Forwarding packet to tun0");
-
-                locked_tun.write_all(&packet.data);
-
-                println!("Sent.");
-
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("Error reading: {:?}", e);
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn to_fixed_size_array(slice: &[u8]) -> Option<[u8; 32]> {
-    if slice.len() != 32 {
-        return None;
-    }
-    let mut array = [0u8; 32];
-    array.copy_from_slice(slice);
-    Some(array)
 }
 
 fn set_client_ip_and_route() {
@@ -178,193 +123,6 @@ fn setup_tun_interface() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
-}
-
-#[tokio::main]
-async fn main() {
-    let matches = App::new("Simple VPN")
-        .version("1.0")
-        .author("Luis Soares")
-        .about("A simple VPN tunnel in Rust")
-        .arg(Arg::with_name("mode")
-            .required(true)
-            .index(1)
-            .possible_values(&["server", "client"])
-            .help("Runs the program in either server or client mode"))
-        .arg(Arg::with_name("vpn-server")
-            .long("vpn-server")
-            .value_name("IP")
-            .help("The IP address of the VPN server to connect to (client mode only)")
-            .takes_value(true))
-        .get_matches();
-
-
-    let is_server_mode = matches.value_of("mode").unwrap() == "server";
-
-    if is_server_mode {
-        // Server mode setup
-        let listener = TcpListener::bind("0.0.0.0:12345").await.unwrap();
-
-        let mut config = tun::Configuration::default();
-
-        config.name("tun0");
-
-        let tun_device = tun::create(&config).unwrap();
-
-        let shared_tun = Arc::new(Mutex::new(tun_device));
-
-        setup_tun_interface();
-
-        println!("Server Mode: Server listening...");
-
-        let shutdown_signal = Arc::new(AtomicBool::new(false));
-
-        // Spawn a task to listen for the Ctrl+C signal
-        let signal_listener = {
-            let shutdown_signal = shutdown_signal.clone();
-            tokio::spawn(async move {
-                tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl_c");
-                shutdown_signal.store(true, Ordering::SeqCst);
-            })
-        };
-
-        // Wait for a shutdown signal
-        loop {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), listener.accept()).await {
-                Ok(Ok((stream, _))) => {
-                    tokio::spawn(handle_client(stream, shared_tun.clone()));
-                }
-                Ok(Err(e)) => {
-                    eprintln!("Error accepting connection: {}", e);
-                }
-                Err(_) => {
-                    // Timeout
-                    if shutdown_signal.load(Ordering::SeqCst) {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Here, you might want to give active tasks a moment to finish before forcing them to shut down.
-        // For example:
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        // If we reach here, it means a shutdown signal was received.
-        destroy_tun_interface().await;
-
-        // Optionally, you can wait for the signal_listener to complete
-        signal_listener.await.expect("Signal listener task failed");
-
-    } else { // Start of CLIENT MODE
-        if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
-            let server_address = format!("{}:12345", vpn_server_ip);
-
-            // Wrap the TcpStream inside an Arc to allow shared ownership.
-            let stream = Arc::new(Mutex::new(TcpStream::connect(server_address).await.unwrap()));
-
-            // Channel for sending serialized data to the writer task
-            let (send_to_writer_tx, mut send_to_writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
-
-            // Writer task
-            let writer_stream = Arc::clone(&stream);
-            tokio::spawn(async move {
-                let mut locked_stream = writer_stream.lock().await;
-                while let Some(data) = send_to_writer_rx.recv().await {
-                    locked_stream.write_all(&data).await.expect("Failed to write to server");
-                }
-            });
-
-            // Reader task
-            let reader_stream = Arc::clone(&stream);
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 4096];
-                let mut locked_stream = reader_stream.lock().await;
-
-                while let Ok(n) = locked_stream.read(&mut buf).await {
-                    if n == 0 { break; }  // Connection closed
-                    let version = buf[0] >> 4;
-
-                    // Handle IPv4 packets
-                    if version == 4 {
-                        let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
-                        let decrypted_data = decrypt(&packet.data);
-                        if let Some(ip_header) = extract_ipv4_header(&decrypted_data) {
-                            if ip_header.protocol == 6 {  // TCP
-                                if let Some(tcp_header) = extract_tcp_header(&decrypted_data[20..]) {
-                                    match forward_packet_to_destination(&decrypted_data, IpAddress::V4(ip_header.daddr), tcp_header.dest_port) {
-                                        Ok(response) => {
-                                            // TODO: Handle writing the response to TUN
-                                        },
-                                        Err(e) => {
-                                            println!("Error forwarding IPv4 packet: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Handle IPv6 packets
-                    else if version == 6 {
-                        let packet: VpnPacket = deserialize(&buf[..n]).unwrap();
-                        let decrypted_data = decrypt(&packet.data);
-                        if let Some(ipv6_header) = extract_ipv6_header(&decrypted_data) {
-                            if ipv6_header.next_header == 6 {  // TCP
-                                if let Some(tcp_header) = extract_tcp_header(&decrypted_data[40..]) {  // Offset is different for IPv6
-                                    match forward_packet_to_destination(&decrypted_data, IpAddress::V6(ipv6_header.destination_address), tcp_header.dest_port) {
-                                        Ok(response) => {
-                                            // TODO: Handle writing the response to TUN
-                                        },
-                                        Err(e) => {
-                                            println!("Error forwarding IPv6 packet: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        println!("Unknown IP version");
-                    }
-                }
-            });
-
-            let mut config = tun::Configuration::default();
-            config.name("tun0");
-            let tun_device = Arc::new(tun::create(&config).unwrap());
-
-            // Client mode setup
-            set_client_ip_and_route();
-
-            let reader_stream_clone = Arc::clone(&stream); // Clone the stream for the second task
-
-            tokio::spawn(async move {
-                loop {
-                    let mut buf = vec![0u8; 4096];
-                    let mut locked_stream = reader_stream_clone.lock().await;
-                    match locked_stream.read(&mut buf).await {
-                        Ok(n) if n > 0 => {
-                            let encrypted_data = encrypt(&buf[..n]);
-                            let packet = VpnPacket { data: encrypted_data };
-                            let serialized_data = serialize(&packet).unwrap();
-                            send_to_writer_tx.send(serialized_data).await.expect("Failed to send to writer");
-                        },
-                        Ok(_) => {},
-                        Err(e) => {
-                            eprintln!("Error reading from TUN device: {}", e);
-                        }
-                    };
-                }
-            });
-
-            println!("Client Mode: Press Ctrl+C to exit.");
-            tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl_c");
-            println!("Exiting...");
-
-        } else {
-            eprintln!("The vpn-server IP address is required for client mode!");
-            return;
-        }
-    }
 }
 
 async fn destroy_tun_interface() {
@@ -443,96 +201,159 @@ struct Ipv6Header {
     destination_address: [u8; 16],
 }
 
-fn extract_ipv6_header(data: &[u8]) -> Option<Ipv6Header> {
+fn handle_client(client_id: usize, mut stream: TcpStream, clients: Arc<Mutex<HashMap<usize, TcpStream>>>) {
+    let mut buffer = [0; 1024];
 
-    println!("Extracting IPv6 Header");
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                println!("Client {} disconnected", client_id);
+                break;
+            }
+            Ok(n) => {
+                let data = &buffer[0..n];
 
-    if data.len() < 40 {  // IPv6 header is 40 bytes
-        return None;
+                println!("Server: data received from the client: {:?}", data);
+
+                let mut clients_guard = clients.lock().unwrap();
+
+                for (id, client_stream) in clients_guard.iter_mut() {
+                    if *id != client_id {
+                        let _ = client_stream.write(data);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Error reading from client {}: {}", client_id, e);
+                break;
+            }
+        }
     }
 
-    let version = data[0] >> 4;
-    let traffic_class = ((data[0] & 0x0F) << 4) | (data[1] >> 4);
-    let flow_label = ((data[1] as u32 & 0x0F) << 16) | (data[2] as u32) << 8 | data[3] as u32;
-    let payload_length = u16::from_be_bytes([data[4], data[5]]);
-    let next_header = data[6];
-    let hop_limit = data[7];
-    let source_address = [
-        data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-        data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
-    ];
-    let destination_address = [
-        data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
-        data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
-    ];
-
-    Some(Ipv6Header {
-        version,
-        traffic_class,
-        flow_label,
-        payload_length,
-        next_header,
-        hop_limit,
-        source_address,
-        destination_address,
-    })
+    clients.lock().unwrap().remove(&client_id);
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
-fn forward_packet_to_destination(packet: &[u8], dest_ip: IpAddress, dest_port: u16) -> Result<Vec<u8>, Box<dyn StdError + Send>> {
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(|e| Box::new(e) as Box<dyn StdError + Send>)?;
-
-    let address_string = match dest_ip {
-        IpAddress::V4(ipv4) => format!("{}.{}.{}.{}:{}", ipv4[0], ipv4[1], ipv4[2], ipv4[3], dest_port),
-        IpAddress::V6(ipv6) => format!("{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{}",
-                                       ipv6[0], ipv6[1], ipv6[2], ipv6[3],
-                                       ipv6[4], ipv6[5], ipv6[6], ipv6[7], dest_port),
-    };
-
-    let address: SocketAddr = address_string.parse().unwrap();
-
-    println!("Server forwarding packet to destination {:?}", dest_ip);
-
-
-    socket.send_to(packet, &address.into()).map_err(|e| Box::new(e) as Box<dyn StdError + Send>)?;
-
-    let mut response = vec![0u8; 4096];
-    let mut uninitialized: [MaybeUninit<u8>; 4096] = unsafe { MaybeUninit::uninit().assume_init() };
-    let (amt, _) = socket.recv_from(&mut uninitialized).map_err(|e| Box::new(e) as Box<dyn StdError + Send>)?;
-    for i in 0..amt {
-        response[i] = unsafe { uninitialized[i].assume_init() };
+fn server_mode() {
+    // Setup the tun0 interface
+    if let Err(e) = setup_tun_interface() {
+        eprintln!("Failed to set up TUN interface: {}", e);
+        return;
     }
-    response.truncate(amt);
 
-    Ok(response)
+    // Set the client's IP and routing
+    set_client_ip_and_route();
+
+    // Existing server logic
+    let listener = TcpListener::bind("0.0.0.0:8080").unwrap();
+    let clients: Arc<Mutex<HashMap<usize, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    println!("Server started on 0.0.0.0:8080");
+
+    for (client_id, stream) in listener.incoming().enumerate() {
+        match stream {
+            Ok(stream) => {
+                clients.lock().unwrap().insert(client_id, stream.try_clone().unwrap());
+
+                let clients_arc = clients.clone();
+                thread::spawn(move || handle_client(client_id, stream, clients_arc));
+            }
+            Err(e) => {
+                println!("Connection failed: {}", e);
+            }
+        }
+    }
+
+    // Clean up the tun0 interface when done
+    destroy_tun_interface();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+const TUN_INTERFACE_NAME: &str = "tun0";
 
-    const KEY: [u8; 32] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+fn read_from_tun_and_send_to_client<T: tun::Device>(mut tun: T, mut client: TcpStream) {
+    let mut buffer = [0u8; 1500];
 
-    #[test]
-    fn test_encryption_decryption() {
-        let original = b"hello";
+    match tun.read(&mut buffer) {
+        Ok(n) => {
+            match encrypt(&buffer[..n]) {
+                Ok(encrypted_data) => {
+                    // Handle sending the encrypted data to the client
 
-        // Encrypt the original data
-        let mut data_to_encrypt = [0u8; 32]; // Initialize an array with zeros
-        data_to_encrypt[..original.len()].copy_from_slice(original); // Copy the data from 'original' into the array
-        let encrypted = encrypt(&data_to_encrypt);
+                    let vpn_packet = VpnPacket { data: encrypted_data };
+                    // Serialize and send to client
+                    let serialized_data = bincode::serialize(&vpn_packet).unwrap();
+                    client.write_all(&serialized_data).unwrap();
 
-        // Ensure the encrypted data isn't the same as the original
-        assert_ne!(&encrypted[..], original);
 
-        // Decrypt the encrypted data
-        let decrypted = decrypt(&encrypted);
+                },
+                Err(err_msg) => {
+                    // Handle the encryption error
+                    println!("Encryption error: {}", err_msg);
+                }
+            }
+        },
+        Err(e) => {
+            // Handle the TUN reading error
+            println!("TUN read error: {}", e);
+        }
+    }
+}
 
-        // Convert decrypted to a slice and trim trailing null bytes
-        let trimmed_decrypted = &decrypted[..original.len()];
+async fn read_from_client_and_write_to_tun(mut client: TcpStream, mut tun: Device) {
+    let mut buffer = [0u8; 1500];
+    loop {
+        let n = client.read(&mut buffer).unwrap();
+        let vpn_packet: VpnPacket = bincode::deserialize(&buffer[..n]).unwrap();
+        let decrypted_data = decrypt(&vpn_packet.data);
+        tun.write(&decrypted_data).unwrap();
+    }
+}
 
-        assert_eq!(original, trimmed_decrypted);
+fn client_mode(vpn_server_ip: &str) {
+    // Basic client mode for demonstration
+    let mut stream = TcpStream::connect(vpn_server_ip).unwrap();
+
+    println!("Connected to the server {}", vpn_server_ip);
+
+    let mut buffer = [0; 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(n) => {
+                println!("Received: {}", String::from_utf8_lossy(&buffer[..n]));
+            }
+            Err(_) => {
+                break;
+            }
+        }
+    }
+}
+
+fn main() {
+    let matches = App::new("Simple VPN")
+        .version("1.0")
+        .author("Luis Soares")
+        .about("A simple VPN tunnel in Rust")
+        .arg(Arg::with_name("mode")
+            .required(true)
+            .index(1)
+            .possible_values(&["server", "client"])
+            .help("Runs the program in either server or client mode"))
+        .arg(Arg::with_name("vpn-server")
+            .long("vpn-server")
+            .value_name("IP")
+            .help("The IP address of the VPN server to connect to (client mode only)")
+            .takes_value(true))
+        .get_matches();
+
+    let is_server_mode = matches.value_of("mode").unwrap() == "server";
+
+    if is_server_mode {
+        server_mode();
+    } else {
+        if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
+            client_mode(vpn_server_ip);
+        } else {
+            eprintln!("Error: For client mode, you must provide the '--vpn-server' argument.");
+        }
     }
 }
