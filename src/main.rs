@@ -209,13 +209,13 @@ fn handle_client(client_id: usize, mut stream: TcpStream, clients: Arc<Mutex<Has
     loop {
         match stream.read(&mut buffer) {
             Ok(0) => {
-                println!("Client {} disconnected", client_id);
+                info!("Client {} disconnected", client_id);
                 break;
             }
             Ok(n) => {
                 let data = &buffer[0..n];
 
-                println!("Server: data received from the client: {:?}", data);
+                info!("Server: data received from the client: {:?}", data);
 
                 let mut clients_guard = clients.lock().unwrap();
 
@@ -226,7 +226,7 @@ fn handle_client(client_id: usize, mut stream: TcpStream, clients: Arc<Mutex<Has
                 }
             }
             Err(e) => {
-                println!("Error reading from client {}: {}", client_id, e);
+                error!("Error reading from client {}: {}", client_id, e);
                 break;
             }
         }
@@ -244,7 +244,6 @@ fn server_mode() {
     let mut config = tun::Configuration::default();
     config.name("tun0");
     let tun_device = tun::create(&config).unwrap();
-    let shared_tun = Arc::new(Mutex::new(tun_device));
 
     // Setup the tun0 interface
     if let Err(e) = setup_tun_interface() {
@@ -252,18 +251,31 @@ fn server_mode() {
         return;
     }
 
-    println!("Server started on 0.0.0.0:8080");
+    let shared_tun = Arc::new(Mutex::new(tun_device));
+
+    info!("Server started on 0.0.0.0:12345");
+
+    let tun_device_clone = shared_tun.clone();
+    let clients_clone = clients.clone();
+    thread::spawn(move || {
+        let client_clone = clients_clone.lock().unwrap().get(&0).unwrap().try_clone().unwrap(); // Just for demonstration. This should be improved.
+        let mut locked_tun = tun_device_clone.lock().unwrap();
+        read_from_tun_and_send_to_client(&mut *locked_tun, client_clone);
+    });
+
 
     for (client_id, stream) in listener.incoming().enumerate() {
         match stream {
             Ok(stream) => {
+
+
                 clients.lock().unwrap().insert(client_id, stream.try_clone().unwrap());
 
                 let clients_arc = clients.clone();
                 thread::spawn(move || handle_client(client_id, stream, clients_arc));
             }
             Err(e) => {
-                println!("Connection failed: {}", e);
+                error!("Connection failed: {}", e);
             }
         }
     }
@@ -274,7 +286,7 @@ fn server_mode() {
 
 const TUN_INTERFACE_NAME: &str = "tun0";
 
-fn read_from_tun_and_send_to_client<T: tun::Device>(mut tun: T, mut client: TcpStream) {
+fn read_from_tun_and_send_to_client<T: tun::Device>(tun: &mut T, mut client: TcpStream) {
     let mut buffer = [0u8; 1500];
 
     match tun.read(&mut buffer) {
@@ -294,13 +306,13 @@ fn read_from_tun_and_send_to_client<T: tun::Device>(mut tun: T, mut client: TcpS
                 },
                 Err(err_msg) => {
                     // Handle the encryption error
-                    println!("Encryption error: {}", err_msg);
+                    error!("Encryption error: {}", err_msg);
                 }
             }
         },
         Err(e) => {
             // Handle the TUN reading error
-            println!("TUN read error: {}", e);
+            error!("TUN read error: {}", e);
         }
     }
 }
@@ -319,6 +331,9 @@ fn client_mode(vpn_server_ip: &str) {
     // Basic client mode for demonstration
     let mut stream = TcpStream::connect(vpn_server_ip).unwrap();
 
+    // Clone the stream so you can use it both inside and outside the async block
+    let stream_clone = stream.try_clone().unwrap();
+
     let mut config = tun::Configuration::default();
     config.name("tun0");
     let tun_device = tun::create(&config).unwrap();
@@ -326,13 +341,17 @@ fn client_mode(vpn_server_ip: &str) {
     // Set the client's IP and routing
     set_client_ip_and_route();
 
-    println!("Connected to the server {}", vpn_server_ip);
+    info!("Connected to the server {}", vpn_server_ip);
+
+    tokio::spawn(async move {
+        read_from_client_and_write_to_tun(stream_clone, tun_device).await;
+    });
 
     let mut buffer = [0; 1024];
     loop {
         match stream.read(&mut buffer) {
             Ok(n) => {
-                println!("Received: {}", String::from_utf8_lossy(&buffer[..n]));
+                info!("Received: {}", String::from_utf8_lossy(&buffer[..n]));
             }
             Err(_) => {
                 break;
