@@ -264,7 +264,6 @@ fn server_mode() {
         if let Some(client) = clients_guard.get(&0) {
             if let Ok(client_clone) = client.try_clone() {
                 drop(clients_guard);  // Unlock the mutex early
-
                 let mut locked_tun = tun_device_clone.lock().unwrap();
                 read_from_tun_and_send_to_client(&mut *locked_tun, client_clone);
             } else {
@@ -280,10 +279,8 @@ fn server_mode() {
     for (client_id, stream) in listener.incoming().enumerate() {
         match stream {
             Ok(stream) => {
-
-
+                info!("New client connected with ID: {}", client_id); // This line is added
                 clients.lock().unwrap().insert(client_id, stream.try_clone().unwrap());
-
                 let clients_arc = clients.clone();
                 thread::spawn(move || handle_client(client_id, stream, clients_arc));
             }
