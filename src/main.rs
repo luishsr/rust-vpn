@@ -412,7 +412,7 @@ async fn  main() {
     } else {
         if let Some(vpn_server_ip) = matches.value_of("vpn-server") {
             let server_address = format!("{}:12345", vpn_server_ip);
-            client_mode(server_address.as_str());
+            client_mode(server_address.as_str()).await;
         } else {
             eprintln!("Error: For client mode, you must provide the '--vpn-server' argument.");
         }
