@@ -281,7 +281,7 @@ async fn read_from_client_and_write_to_tun(client: &mut TcpStream, tun: &mut Dev
                 let vpn_packet: VpnPacket = bincode::deserialize(&buffer[..n]).unwrap();
                 let decrypted_data = decrypt(&vpn_packet.data);
 
-                info!("Writing data to tun0: {}", String::from_utf8_lossy(decrypted_data.as_slice()));
+                info!("Writing data to tun0");
 
                 tun.write(&decrypted_data).unwrap();
             }
