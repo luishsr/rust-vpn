@@ -344,7 +344,14 @@ fn read_from_tun_and_send_to_client<T: tun::Device>(tun: &mut T, mut client: Tcp
 async fn read_from_client_and_write_to_tun(client: &mut TcpStream, tun: &mut Device) {
     let mut buffer = [0u8; 1500];
     loop {
-        let n = client.read(&mut buffer).unwrap();
+        let n = match client.read(&mut buffer) {
+            Ok(n) => n,
+            Err(e) => {
+                error!("Error reading from client: {}", e);
+                continue; // or return based on how you want to handle it
+            }
+        };
+
         let vpn_packet: VpnPacket = bincode::deserialize(&buffer[..n]).unwrap();
         let decrypted_data = decrypt(&vpn_packet.data);
 
