@@ -170,7 +170,6 @@ fn handle_client(client_id: usize, mut stream: TcpStream, clients: Arc<Mutex<Has
 }
 
 fn server_mode() {
-    // Existing server logic
     let listener = TcpListener::bind("0.0.0.0:12345").unwrap();
     let clients: Arc<Mutex<HashMap<usize, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
 
@@ -212,7 +211,7 @@ fn server_mode() {
     for (client_id, stream) in listener.incoming().enumerate() {
         match stream {
             Ok(stream) => {
-                info!("New client connected with ID: {}", client_id); // This line is added
+                info!("New client connected with ID: {}", client_id);
 
                 let tun_device_clone = shared_tun.clone();
                 let clients_clone = clients.clone();
@@ -287,7 +286,7 @@ async fn read_from_client_and_write_to_tun(client: &mut TcpStream, tun: &mut Dev
             }
             Err(e) => {
                 error!("Error reading from client: {}", e);
-                continue; // or return based on how you want to handle it
+                continue;
             }
         };
 
@@ -299,7 +298,7 @@ async fn client_mode(vpn_server_ip: &str) {
     // Basic client mode for demonstration
     let mut stream = TcpStream::connect(vpn_server_ip).unwrap();
 
-    // Clone the stream so you can use it both inside and outside the async block
+    // Clone the stream we can use it both inside and outside the async block
     let mut stream_clone = stream.try_clone().unwrap();
 
     let mut config = tun::Configuration::default();
