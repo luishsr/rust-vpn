@@ -338,41 +338,41 @@ fn read_from_tun_and_send_to_client<T: tun::Device>(tun: &mut T, mut client: Tcp
     }
 }
 
-async fn read_from_client_and_write_to_tun(mut client: TcpStream, mut tun: Device) {
+async fn read_from_client_and_write_to_tun(client: &mut TcpStream, tun: &mut Device) {
     let mut buffer = [0u8; 1500];
     loop {
         let n = client.read(&mut buffer).unwrap();
         let vpn_packet: VpnPacket = bincode::deserialize(&buffer[..n]).unwrap();
         let decrypted_data = decrypt(&vpn_packet.data);
+
+        info!("Writing data to tun0: {}", String::from_utf8_lossy(decrypted_data.as_slice()));
+
         tun.write(&decrypted_data).unwrap();
     }
 }
 
-fn client_mode(vpn_server_ip: &str) {
+async fn client_mode(vpn_server_ip: &str) {
     // Basic client mode for demonstration
     let mut stream = TcpStream::connect(vpn_server_ip).unwrap();
 
     // Clone the stream so you can use it both inside and outside the async block
-    let stream_clone = stream.try_clone().unwrap();
+    let mut stream_clone = stream.try_clone().unwrap();
 
     let mut config = tun::Configuration::default();
     config.name("tun0");
-    let tun_device = tun::create(&config).unwrap();
+    let mut tun_device = tun::create(&config).unwrap();
 
     // Set the client's IP and routing
     set_client_ip_and_route();
 
     info!("Connected to the server {}", vpn_server_ip);
 
-    tokio::spawn(async move {
-        read_from_client_and_write_to_tun(stream_clone, tun_device).await;
-    });
-
     let mut buffer = [0; 1024];
     loop {
         match stream.read(&mut buffer) {
             Ok(n) => {
                 info!("Received: {}", String::from_utf8_lossy(&buffer[..n]));
+                read_from_client_and_write_to_tun(&mut stream_clone, &mut tun_device).await;
             }
             Err(_) => {
                 break;
