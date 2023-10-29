@@ -381,7 +381,7 @@ async fn client_mode(vpn_server_ip: &str) {
     loop {
         match stream.read(&mut buffer) {
             Ok(n) => {
-                info!("Received: {}", String::from_utf8_lossy(&buffer[..n]));
+                info!("{} Received from the server", n);
                 read_from_client_and_write_to_tun(&mut stream_clone, &mut tun_device).await;
             }
             Err(_) => {
