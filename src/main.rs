@@ -46,12 +46,6 @@ struct VpnPacket {
     data: Vec<u8>,
 }
 
-#[derive(Debug)]
-enum IpAddress {
-    V4([u8; 4]),
-    V6([u8; 16]),
-}
-
 fn set_client_ip_and_route() {
     let ip_output = Command::new("ip")
         .arg("addr")
@@ -141,68 +135,6 @@ async fn destroy_tun_interface() {
     }
 }
 
-struct Ipv4Header {
-    version: u8,
-    ihl: u8,
-    tot_len: u16,
-    id: u16,
-    flags: u16,
-    ttl: u8,
-    protocol: u8,
-    checksum: u16,
-    saddr: [u8; 4],
-    daddr: [u8; 4],
-}
-
-struct TcpHeader {
-    source_port: u16,
-    dest_port: u16,
-    // ... Other TCP header fields ...
-}
-
-fn extract_ipv4_header(packet: &[u8]) -> Option<Ipv4Header> {
-    if packet.len() < 20 {
-        return None;
-    }
-
-    Some(Ipv4Header {
-        version: packet[0] >> 4,
-        ihl: packet[0] & 0xF,
-        tot_len: u16::from_be_bytes([packet[2], packet[3]]),
-        id: u16::from_be_bytes([packet[4], packet[5]]),
-        flags: u16::from_be_bytes([packet[6], packet[7]]),
-        ttl: packet[8],
-        protocol: packet[9],
-        checksum: u16::from_be_bytes([packet[10], packet[11]]),
-        saddr: [packet[12], packet[13], packet[14], packet[15]],
-        daddr: [packet[16], packet[17], packet[18], packet[19]],
-    })
-}
-
-fn extract_tcp_header(packet: &[u8]) -> Option<TcpHeader> {
-    if packet.len() < 20 {
-        return None;
-    }
-
-    Some(TcpHeader {
-        source_port: u16::from_be_bytes([packet[0], packet[1]]),
-        dest_port: u16::from_be_bytes([packet[2], packet[3]]),
-        // ... Extract other TCP fields as needed ...
-    })
-}
-
-#[derive(Debug)]
-struct Ipv6Header {
-    version: u8,
-    traffic_class: u8,
-    flow_label: u32,
-    payload_length: u16,
-    next_header: u8,
-    hop_limit: u8,
-    source_address: [u8; 16],
-    destination_address: [u8; 16],
-}
-
 fn handle_client(client_id: usize, mut stream: TcpStream, clients: Arc<Mutex<HashMap<usize, TcpStream>>>) {
     let mut buffer = [0; 1024];
 
@@ -281,16 +213,15 @@ fn server_mode() {
             Ok(stream) => {
                 info!("New client connected with ID: {}", client_id); // This line is added
 
-                if client_id == 0 {  // For now, only starting TUN data handling for the first client
-                    let tun_device_clone = shared_tun.clone();
-                    let clients_clone = clients.clone();
+                let tun_device_clone = shared_tun.clone();
+                let clients_clone = clients.clone();
 
-                    thread::spawn(move || {
-                        let client_clone = clients_clone.lock().unwrap().get(&0).unwrap().try_clone().unwrap();
-                        let mut locked_tun = tun_device_clone.lock().unwrap();
-                        read_from_tun_and_send_to_client(&mut *locked_tun, client_clone);
-                    });
-                }
+                thread::spawn(move || {
+                   let client_clone = clients_clone.lock().unwrap().get(&0).unwrap().try_clone().unwrap();
+                   let mut locked_tun = tun_device_clone.lock().unwrap();
+                   read_from_tun_and_send_to_client(&mut *locked_tun, client_clone);
+                });
+
                 clients.lock().unwrap().insert(client_id, stream.try_clone().unwrap());
                 let clients_arc = clients.clone();
                 thread::spawn(move || handle_client(client_id, stream, clients_arc));
@@ -302,7 +233,7 @@ fn server_mode() {
     }
 
     // Clean up the tun0 interface when done
-    destroy_tun_interface();
+    let _ = destroy_tun_interface();
 }
 
 const TUN_INTERFACE_NAME: &str = "tun0";
@@ -344,20 +275,22 @@ fn read_from_tun_and_send_to_client<T: tun::Device>(tun: &mut T, mut client: Tcp
 async fn read_from_client_and_write_to_tun(client: &mut TcpStream, tun: &mut Device) {
     let mut buffer = [0u8; 1500];
     loop {
-        let n = match client.read(&mut buffer) {
-            Ok(n) => n,
+        match client.read(&mut buffer) {
+            Ok(n) => {
+                let vpn_packet: VpnPacket = bincode::deserialize(&buffer[..n]).unwrap();
+                let decrypted_data = decrypt(&vpn_packet.data);
+
+                info!("Writing data to tun0: {}", String::from_utf8_lossy(decrypted_data.as_slice()));
+
+                tun.write(&decrypted_data).unwrap();
+            }
             Err(e) => {
                 error!("Error reading from client: {}", e);
                 continue; // or return based on how you want to handle it
             }
         };
 
-        let vpn_packet: VpnPacket = bincode::deserialize(&buffer[..n]).unwrap();
-        let decrypted_data = decrypt(&vpn_packet.data);
 
-        //info!("Writing data to tun0: {}", String::from_utf8_lossy(decrypted_data.as_slice()));
-
-        tun.write(&decrypted_data).unwrap();
     }
 }
 
@@ -369,7 +302,7 @@ async fn client_mode(vpn_server_ip: &str) {
     let mut stream_clone = stream.try_clone().unwrap();
 
     let mut config = tun::Configuration::default();
-    config.name("tun0");
+    config.name(TUN_INTERFACE_NAME);
     let mut tun_device = tun::create(&config).unwrap();
 
     // Set the client's IP and routing
