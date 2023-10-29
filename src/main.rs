@@ -310,32 +310,35 @@ const TUN_INTERFACE_NAME: &str = "tun0";
 fn read_from_tun_and_send_to_client<T: tun::Device>(tun: &mut T, mut client: TcpStream) {
     let mut buffer = [0u8; 1500];
 
-    match tun.read(&mut buffer) {
-        Ok(n) => {
-            match encrypt(&buffer[..n]) {
-                Ok(encrypted_data) => {
-                    // Handle sending the encrypted data to the client
-                    info!("Received {} bytes from TUN device.", n);
+    loop {
+        match tun.read(&mut buffer) {
+            Ok(n) => {
+                match encrypt(&buffer[..n]) {
+                    Ok(encrypted_data) => {
+                        // Handle sending the encrypted data to the client
+                        info!("Received {} bytes from TUN device.", n);
 
-                    let vpn_packet = VpnPacket { data: encrypted_data };
-                    // Serialize and send to client
-                    let serialized_data = bincode::serialize(&vpn_packet).unwrap();
+                        let vpn_packet = VpnPacket { data: encrypted_data };
+                        // Serialize and send to client
+                        let serialized_data = bincode::serialize(&vpn_packet).unwrap();
 
-                    client.write_all(&serialized_data).unwrap();
-                    info!("Forwarded {} bytes to destination.", n);
+                        client.write_all(&serialized_data).unwrap();
+                        info!("Forwarded {} bytes to destination.", n);
 
-                },
-                Err(err_msg) => {
-                    // Handle the encryption error
-                    error!("Encryption error: {}", err_msg);
+                    },
+                    Err(err_msg) => {
+                        // Handle the encryption error
+                        error!("Encryption error: {}", err_msg);
+                    }
                 }
+            },
+            Err(e) => {
+                // Handle the TUN reading error
+                error!("TUN read error: {}", e);
             }
-        },
-        Err(e) => {
-            // Handle the TUN reading error
-            error!("TUN read error: {}", e);
         }
     }
+
 }
 
 async fn read_from_client_and_write_to_tun(client: &mut TcpStream, tun: &mut Device) {
