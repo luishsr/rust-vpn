@@ -194,7 +194,7 @@ fn server_mode() {
     thread::spawn(move || {
         let clients_guard = clients_clone.lock().unwrap();
 
-        if let Some(client) = clients_guard.get(&0) {
+        if let Some(client) = clients_guard.get(&0) { //TODO: Implement multi-client
             if let Ok(client_clone) = client.try_clone() {
                 drop(clients_guard);  // Unlock the mutex early
                 let mut locked_tun = tun_device_clone.lock().unwrap();
